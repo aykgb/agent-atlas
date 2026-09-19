@@ -20,6 +20,6 @@
 | 14 | 已打开页面自动更新（轮询 meta + 自动检查按挂钟计时） | P1 | ✅ | [auto-refresh-page.md](docs/tasks/auto-refresh-page.md)：CDP 冒烟通过 |
 | 15 | 会话详情：Agent 响应统一折叠、段落按原顺序排列 | P1 | ✅ | [turn-output-grouping.md](docs/tasks/turn-output-grouping.md)：CDP 冒烟通过 |
 | 16 | 会话列表 tab + 完整会话查看 + 搜索结果跳转 | P1 | ✅ | [session-list.md](docs/tasks/session-list.md)：CDP 冒烟通过 |
-| 17 | 词频支持倒序排列（低→高返回频次最低的 N 词） | P2 | ✅ | [words-ascending-order.md](docs/tasks/words-ascending-order.md)：a2e99c7（契约与实测通过） |
+| 17 | 词频支持倒序排列（低→高返回频次最低的 N 词） | P2 | ✅ | [words-ascending-order.md](docs/tasks/words-ascending-order.md)：500a1af（契约与实测通过） |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。
