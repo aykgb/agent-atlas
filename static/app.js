@@ -10,6 +10,28 @@ function notice(text = '', error = false) {
   $('notice').textContent = text;
   $('notice').classList.toggle('error', error);
 }
+const tip = $('tip');
+function showTip(html, x, y) {
+  if (tip.dataset.html !== html) { tip.innerHTML = html; tip.dataset.html = html; }
+  tip.hidden = false;
+  const pad = 14;
+  const left = Math.min(x + pad, window.innerWidth - tip.offsetWidth - 8);
+  const top = y + pad + tip.offsetHeight > window.innerHeight ? y - tip.offsetHeight - pad : y + pad;
+  tip.style.left = Math.max(8, left) + 'px';
+  tip.style.top = Math.max(8, top) + 'px';
+}
+function hideTip() {
+  tip.hidden = true;
+}
+function bindTips(container) {
+  container.querySelectorAll('[data-tip]').forEach(el => {
+    el.addEventListener('mouseenter', event => showTip(el.dataset.tip, event.clientX, event.clientY));
+    el.addEventListener('mousemove', event => showTip(el.dataset.tip, event.clientX, event.clientY));
+    el.addEventListener('mouseleave', hideTip);
+    el.addEventListener('focus', () => { const r = el.getBoundingClientRect(); showTip(el.dataset.tip, r.left + r.width / 2, r.top); });
+    el.addEventListener('blur', hideTip);
+  });
+}
 async function api(path, params = {}, options = {}) {
   const response = await fetch(path + (Object.keys(params).length ? '?' + new URLSearchParams(params) : ''), options);
   const result = await response.json();
@@ -60,6 +82,7 @@ function renderUsage(data) {
   renderCharts();
 }
 function renderCharts() {
+  hideTip();
   const data = state.usage;
   if (!data) return;
   const grouping = $('group').value;
@@ -90,25 +113,30 @@ function renderCharts() {
   }
   const stride=(width-left-10)/groups.length, bar=Math.min(30,stride*.62);
   groups.forEach((g,i) => {
+    const bucketTotal=Object.values(g.values).reduce((a,b) => a+b,0);
     let y=bottom;
     keys.forEach((key,j) => {
       const value=g.values[key], h=value/max*plot;
       if (!value) return;
       y-=h;
       const label=g.bucket+' · '+key+' · '+number(value)+' tokens';
-      svg += '<rect tabindex="0" aria-label="'+esc(label)+'" x="'+(left+stride*i+(stride-bar)/2)+'" y="'+y+'" width="'+bar+'" height="'+h+'" fill="'+colors[j]+'"><title>'+esc(label)+'</title></rect>';
+      const detail=esc(g.bucket)+' · '+esc(key)+'<br>'+number(value)+' tokens · 占该周期 '+(value/bucketTotal*100).toFixed(1)+'%';
+      svg += '<rect tabindex="0" aria-label="'+esc(label)+'" data-tip="'+detail+'" x="'+(left+stride*i+(stride-bar)/2)+'" y="'+y+'" width="'+bar+'" height="'+h+'" fill="'+colors[j]+'"></rect>';
     });
     svg += '<text x="'+(left+stride*(i+.5))+'" y="251" text-anchor="middle">'+esc(g.bucket.length===7 ? g.bucket.slice(2) : g.bucket.slice(5))+'</text>';
   });
   $('bars').innerHTML = svg+'</svg>';
   $('barLegend').innerHTML = keys.map((k,i) => '<span><i class="swatch" style="background:'+colors[i]+'"></i>'+esc(k)+'</span>').join('');
-  let degrees=0;
-  const stops=keys.map((key,i) => {
+  let start=0;
+  const slices=keys.map((key,i) => {
     const value=key==='其他' ? ranked.slice(7).reduce((s,[,v])=>s+v,0) : totals.get(key);
-    const start=degrees; degrees+=value/total*360;
-    return colors[i]+' '+start+'deg '+degrees+'deg';
-  });
-  $('pie').innerHTML = '<div class="pie-wrap"><div class="donut" role="img" aria-label="用量占比，数值见下方图例" style="background:conic-gradient('+stops.join(',')+')"></div><div class="donut-center"><b>'+ranked.length+'</b><small>活跃分组</small></div></div>';
+    const share=value/total*100, label=key+' · '+number(value)+' tokens · 占总量 '+share.toFixed(1)+'%';
+    const slice='<circle tabindex="0" aria-label="'+esc(label)+'" data-tip="'+esc(key)+'<br>'+number(value)+' tokens · 占总量 '+share.toFixed(1)+'%" cx="21" cy="21" r="17.375" fill="none" stroke="'+colors[i]+'" stroke-width="7.25" pathLength="100" stroke-dasharray="0 '+start+' '+share+' 100" transform="rotate(-90 21 21)"></circle>';
+    start+=share;
+    return slice;
+  }).join('');
+  $('pie').innerHTML = '<div class="pie-wrap"><svg class="donut" viewBox="0 0 42 42" role="img" aria-label="用量占比，共 '+ranked.length+' 个活跃分组">'+slices+'</svg><div class="donut-center"><b>'+ranked.length+'</b><small>活跃分组</small></div></div>';
+  bindTips($('bars')); bindTips($('pie'));
   $('pieLegend').innerHTML = keys.map((k,i) => {
     const v=k==='其他' ? ranked.slice(7).reduce((s,[,v])=>s+v,0) : totals.get(k);
     return '<div class="pie-row" title="'+number(v)+' tokens"><i class="swatch" style="background:'+colors[i]+'"></i><span class="pie-name">'+esc(k)+'</span><span>'+compact(v)+'</span><strong>'+(v/total*100).toFixed(1)+'%</strong></div>';
@@ -172,6 +200,7 @@ function addExcluded() {
 }
 async function load() {
   const request=++state.request, tab=state.tab;
+  hideTip();
   notice('正在读取…');
   try {
     if ($('start').value && $('end').value && $('start').value > $('end').value) throw new Error('开始日期不能晚于结束日期');
