@@ -23,6 +23,7 @@ EXCLUDE_FILE = ROOT / 'words-exclude.txt'
 REMOTES_FILE = ROOT / 'remotes.json'
 SCHEMA_VERSION = 4
 AUTO_REFRESH_SECONDS = 30 * 60
+AUTO_REFRESH_STEP_SECONDS = 60
 STOP = set('的 了 和 是 在 我 你 他 她 它 这 那 一个 一些 我们 你们 他们 可以 需要 使用 进行 以及 并且 如果 然后 这个 那个 不 有 就 都 也 到 与 为 对 中 将 请 把 被 要 吗 呢 啊 the a an and or is are to of in for on with this that it be as at by from you your i we'.split())
 LOOPBACK = frozenset({'127.0.0.1', 'localhost', '::1'})
 DEFAULT_ALLOWED = ('100.64.216.70',)
@@ -358,9 +359,18 @@ def update_index(path, home=None):
         con.close()
 
 
-def watch_index(server, interval=AUTO_REFRESH_SECONDS):
+def sleep_until(deadline, step=AUTO_REFRESH_STEP_SECONDS, clock=time.time, sleep=time.sleep):
+    """分片睡眠到挂钟 deadline；系统睡眠跨过检查点时唤醒后提前到期。"""
     while True:
-        time.sleep(interval)
+        remaining = deadline - clock()
+        if remaining <= 0:
+            return
+        sleep(min(remaining, step))
+
+
+def watch_index(server, interval=AUTO_REFRESH_SECONDS, clock=time.time, sleep=time.sleep):
+    while True:
+        sleep_until(clock() + interval, clock=clock, sleep=sleep)
         if not server.refresh_lock.acquire(blocking=False):
             continue
         try:

@@ -14,10 +14,10 @@ from urllib.parse import parse_qs, urlsplit
 
 import stats_data
 from stats_data import Dataset, collect, usage_values
-from stats_server import (LOOPBACK, Handler, Server, allowed_hosts, changed_files, clean_remotes, close_sources,
-                          connect, excluded_words, load_remotes, open_sources, period, query, rebuild,
-                          remote_path, remote_status, remotes_payload, save_excluded, save_remotes,
-                          sync_remote, update_index)
+from stats_server import (AUTO_REFRESH_SECONDS, LOOPBACK, Handler, Server, allowed_hosts, changed_files,
+                          clean_remotes, close_sources, connect, excluded_words, load_remotes, open_sources,
+                          period, query, rebuild, remote_path, remote_status, remotes_payload, save_excluded,
+                          save_remotes, sleep_until, sync_remote, update_index)
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -624,6 +624,22 @@ class Contracts(unittest.TestCase):
         self.assertIn('dshword',terms)
         for excluded in ('pluginword','summaryword','legacyword'):
             self.assertNotIn(excluded,terms)
+
+    def test_sleep_until_slices_by_wall_clock_and_wakes_after_system_sleep(self):
+        now=[0.0]
+        sleeps=[]
+        def paced(seconds):
+            sleeps.append(seconds)
+            now[0]+=seconds
+        sleep_until(AUTO_REFRESH_SECONDS,clock=lambda: now[0],sleep=paced)
+        self.assertEqual(sleeps,[60]*(AUTO_REFRESH_SECONDS//60))
+        self.assertEqual(now[0],AUTO_REFRESH_SECONDS)
+        sleeps.clear()
+        def suspended(seconds):
+            sleeps.append(seconds)
+            now[0]+=900
+        sleep_until(now[0]+AUTO_REFRESH_SECONDS,clock=lambda: now[0],sleep=suspended)
+        self.assertEqual(len(sleeps),2)
 
     def test_auto_refresh_gate_sees_only_new_activity(self):
         file_a=self.remote_log(self.home,[

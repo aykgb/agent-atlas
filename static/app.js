@@ -97,8 +97,26 @@ async function saveRemotes(list, target) {
     await load();
   } catch (error) { notice(error.message, true); }
 }
-async function metadata() {
-  const data = await api('/api/meta');
+const dataVersion = d => [d.updated, d.turns, d.sessions].join('|');
+let knownVersion = null;
+let checking = false;
+async function checkFresh() {
+  if (checking || document.hidden) return;
+  checking = true;
+  try {
+    const data = await api('/api/meta');
+    if (dataVersion(data) === knownVersion) return;
+    await metadata(data);
+    state.page = 1;
+    await load();
+  } catch (error) {
+  } finally {
+    checking = false;
+  }
+}
+async function metadata(preloaded) {
+  const data = preloaded || await api('/api/meta');
+  knownVersion = dataVersion(data);
   for (const [id, values, label] of [['agent', data.agents, '全部 agent'], ['model', data.models, '全部模型']]) {
     const selected = $(id).value;
     $(id).innerHTML = '<option value="">' + label + '</option>' + values.map(v => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join('');
@@ -362,3 +380,5 @@ for(const id of ['minLen','maxLen']) $(id).addEventListener('keydown',event=>{if
 $('remoteWords').addEventListener('change',()=>{if($('remoteWords').checked)$('remoteSearch').checked=true;});
 $('remoteSearch').addEventListener('change',()=>{if(!$('remoteSearch').checked)$('remoteWords').checked=false;});
 metadata().then(load).catch(error=>notice(error.message,true));
+setInterval(checkFresh,60000);
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)checkFresh();});

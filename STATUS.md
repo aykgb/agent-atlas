@@ -17,5 +17,6 @@
 | 11 | 刷新改增量（水位 + size）、远端面板每台独立启停 | — | ✅ | 0f4b287 |
 | 12 | 控制脚本未就绪则阻塞到就绪（server.sh / server.ps1） | P2 | ✅ | [server-wait-ready.md](docs/tasks/server-wait-ready.md) |
 | 13 | 用量概览：Agent 与模型使用排名 | P2 | ✅ | [usage-rankings.md](docs/tasks/usage-rankings.md)：CDP 冒烟通过 |
+| 14 | 已打开页面自动更新（轮询 meta + 自动检查按挂钟计时） | P1 | ✅ | [auto-refresh-page.md](docs/tasks/auto-refresh-page.md)：CDP 冒烟通过 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。
