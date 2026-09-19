@@ -1,12 +1,16 @@
 """Read local agent logs into usage events and searchable conversation turns."""
 import json
 import re
+import shutil
 import sqlite3
+import subprocess
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok')
+TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok', 'dsh')
+ZSTD = shutil.which('zstd')
+DSH_VERSION_RE = re.compile(r'\.v(\d+)\.jsonl\.zstd$')
 FIELDS = ('new', 'cc', 'cr', 'out', 'msgs')
 GENERATED = ('environment_context', 'recommended_plugins', 'codex_delegation', 'turn_aborted', 'skill',
              'user_instructions', 'system-reminder', 'local-command-stdout', 'bash-stdout', 'bash-stderr',
@@ -41,9 +45,20 @@ def stamp(value):
         return ''
 
 
+def zstd_lines(path):
+    if not ZSTD:
+        raise OSError(f'{path.name}: 未找到 zstd 命令，无法读取 dsh 会话')
+    result = subprocess.run([ZSTD, '-dc', '--quiet', str(path)], capture_output=True,
+                            text=True, encoding='utf-8', errors='replace')
+    if result.returncode != 0:
+        raise ValueError(f'{path.name}: zstd 解压失败')
+    return result.stdout.splitlines()
+
+
 def read_jsonl(path, warnings):
     skipped = 0
-    with path.open(encoding='utf-8', errors='replace') as stream:
+    stream = zstd_lines(path) if path.suffix == '.zstd' else path.open(encoding='utf-8', errors='replace')
+    try:
         for number, line in enumerate(stream, 1):
             try:
                 value = json.loads(line)
@@ -53,6 +68,9 @@ def read_jsonl(path, warnings):
                     skipped += 1
             except ValueError:
                 warnings.append(f'{path.name}:{number} 无法解析，已跳过')
+    finally:
+        if hasattr(stream, 'close'):
+            stream.close()
     if skipped:
         warnings.append(f'{path.name}: {skipped} 条非对象记录已跳过')
 
@@ -93,9 +111,15 @@ def blocks(content, role='assistant', channel=None):
         elif typ == 'tool':
             kind = '工具调用'
             value = part.get('name', part.get('tool', '')) + '\n' + json.dumps((part.get('state') or {}).get('input', {}), ensure_ascii=False, indent=2)
-        elif typ in ('tool_use', 'toolCall'):
+        elif typ in ('tool_use', 'toolCall', 'tool-call'):
             kind = '工具调用'
-            value = part.get('name', part.get('tool', '')) + '\n' + json.dumps(part.get('input', part.get('arguments', {})), ensure_ascii=False, indent=2)
+            arguments = part.get('input', part.get('arguments', {}))
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    pass
+            value = part.get('name', part.get('tool', '')) + '\n' + json.dumps(arguments, ensure_ascii=False, indent=2)
         elif typ in ('thinking', 'reasoning'):
             kind, value = '思考', text_of(part)
         else:
@@ -116,6 +140,9 @@ def usage_values(agent, u):
     if agent == 'grok':
         cr, cc = u.get('cachedReadTokens', 0), u.get('cacheCreationTokens', 0)
         return [max(u.get('inputTokens', 0) - cr - cc, 0), cc, cr, u.get('outputTokens', 0), u.get('modelCalls', 1)]
+    if agent == 'dsh':
+        # dsh 的 inputTokens 不含缓存读取，outputTokens 已含思考（totalTokens 可验证）。
+        return [u.get('inputTokens', 0), 0, u.get('cacheReadTokens', 0), u.get('outputTokens', 0), 1]
     cr, cc = u.get('cached_input_tokens', 0), u.get('cache_write_input_tokens', 0)
     # Codex output_tokens includes reasoning; total_tokens confirms that boundary.
     return [max(u.get('input_tokens', 0) - cr - cc, 0), cc, cr, u.get('output_tokens', 0), 1]
@@ -150,7 +177,7 @@ class Dataset:
     def read_file(self, agent, path):
         records = list(read_jsonl(path, self.warnings))
         self.sources[agent] += 1
-        session = path.parent.name if agent == 'grok' else path.stem
+        session = path.parent.name if agent in ('grok', 'dsh') else path.stem
         generated = path.parent.name == 'subagents'
         current = None
         model = 'unknown'
@@ -263,6 +290,43 @@ class Dataset:
                     output([{'kind': '工具结果', 'text': text_of(p.get('output')) or json.dumps(p.get('output'), ensure_ascii=False)}])
                 elif pt.endswith('_call'):
                     output([{'kind': '工具调用', 'text': p.get('name', pt) + '\n' + text_of(p.get('arguments', p.get('input', '')))}])
+            elif agent == 'dsh':
+                p = d.get('data') or {}
+                if typ == 'session':
+                    session = d.get('id') or session
+                    generated = bool(d.get('delegationDepth'))
+                elif typ == 'user/message':
+                    identity = p.get('id') or index
+                    if identity in seen_messages:
+                        continue
+                    seen_messages.add(identity)
+                    human = (p.get('source') or {}).get('kind') == 'user'
+                    text = text_of(p.get('content'))
+                    if not text:
+                        continue
+                    if not human and current:
+                        output([{'kind': '上下文', 'text': text}])
+                    else:
+                        user(text, d.get('time'), identity, words=human and not generated)
+                elif typ == 'assistant/message':
+                    message = p.get('message') or {}
+                    identity = message.get('id') or index
+                    if identity in seen_messages:
+                        continue
+                    seen_messages.add(identity)
+                    model = (message.get('source') or {}).get('model') or model
+                    output(blocks(message.get('content')))
+                    if p.get('usage'):
+                        self.add_usage(agent, session, model, d.get('time'), p['usage'], identity)
+                elif typ == 'tool/result':
+                    output(blocks((p.get('message') or {}).get('content'), role='tool'))
+                elif typ == 'compaction/summary':
+                    identity = p.get('compactionId') or index
+                    summary = text_of(p.get('summary'))
+                    if summary:
+                        user(summary, d.get('time'), identity, words=False)
+                    if p.get('usage'):
+                        self.add_usage(agent, session, p.get('model') or model, d.get('time'), p['usage'], identity)
             elif agent == 'grok':
                 p = d.get('params') or {}
                 u, meta = p.get('update') or {}, p.get('_meta') or {}
@@ -330,12 +394,19 @@ class Dataset:
 def discover(home=None):
     root = Path(home or Path.home()).resolve()
     patterns = {'claude': '.claude/projects/**/*.jsonl', 'codex': '.codex/sessions/**/*.jsonl',
-                'pi': '.pi/agent/sessions/**/*.jsonl', 'grok': '.grok/sessions/**/updates.jsonl'}
+                'pi': '.pi/agent/sessions/**/*.jsonl', 'grok': '.grok/sessions/**/updates.jsonl',
+                'dsh': '.dsh/sessions/*/session*/*.jsonl.zstd'}
     found = []
     for agent, pattern in patterns.items():
         paths = set(root.glob(pattern))
         if agent == 'codex':
             paths.update(root.glob('.codex/archived_sessions/**/*.jsonl'))
+        if agent == 'dsh':
+            versions = {}
+            for path in paths:
+                match = DSH_VERSION_RE.search(path.name)
+                versions.setdefault(path.parent, []).append((int(match.group(1)) if match else 0, path))
+            paths = {max(entries, key=lambda entry: (entry[0], entry[1].name))[1] for entries in versions.values()}
         found.extend((agent, path) for path in sorted(paths))
     db = root / '.local/share/opencode/opencode.db'
     if db.exists():

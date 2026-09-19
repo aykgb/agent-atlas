@@ -1,11 +1,11 @@
 # CLAUDE.md
 
-统计本机五类 agent（Claude、Codex、Pi、OpenCode、Grok）的 token 用量：Python 标准库 + jieba 后端，原生 JavaScript + SVG 前端，SQLite FTS5 索引。
+统计本机六类 agent（Claude、Codex、Pi、OpenCode、Grok、dsh）的 token 用量：Python 标准库 + jieba 后端，原生 JavaScript + SVG 前端，SQLite FTS5 索引。
 
 ## Project map
 
 - `stats_server.py` — HTTP 服务，默认 127.0.0.1:18763；建索引与查询
-- `stats_data.py` — 日志解析、去重与聚合（五类 agent 日志）
+- `stats_data.py` — 日志解析、去重与聚合（六类 agent 日志）
 - `stats-today.py` — CLI，直接读日志，不依赖索引
 - `server.sh` / `server.ps1` — 服务控制：start / stop / restart / status（macOS / Windows），PID 与日志存于 .stats/
 - `static/` — 前端：index.html、app.js、style.css
@@ -31,6 +31,7 @@
 
 <important if="you are modifying log parsing, dedup, or aggregation logic">
 - README「数据来源与口径」一节是规格，tests/ 是它的可执行版本；改动时同步更新 README 与测试。
+- dsh 的 `inputTokens` 不含缓存读取、`outputTokens` 已含思考；注入消息并入当前轮「上下文」段、压缩摘要单独成轮，都不计词频。
 </important>
 
 <important if="you are about to commit">
@@ -40,6 +41,7 @@
 
 <important if="you are adding dependencies or frontend resources">
 - Python 侧仅标准库与 jieba；前端为原生 JavaScript + SVG，不引入 npm 或第三方网页资源。
+- dsh 会话经系统 `zstd` 命令解压（外部命令，不算 Python 依赖）；缺失时跳过 dsh 并在页脚提示，不报错。
 </important>
 
 <important if="you are modifying the network layer of stats_server.py (binding, headers, routing)">

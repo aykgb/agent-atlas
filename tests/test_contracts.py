@@ -1,12 +1,16 @@
 import json
 import os
+import shutil
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
+import stats_data
 from stats_data import Dataset, collect, usage_values
 from stats_server import (LOOPBACK, Handler, allowed_hosts, clean_remotes, close_sources, connect,
                           excluded_words, load_remotes, open_sources, period, query, rebuild,
@@ -15,6 +19,7 @@ from stats_server import (LOOPBACK, Handler, allowed_hosts, clean_remotes, close
 
 
 TS = '2026-09-18T12:00:00+08:00'
+DSH_TIME = 1789800000000
 
 
 def fake_handler(host, origin=None, names=None, client='127.0.0.1', forwarded=None):
@@ -36,6 +41,13 @@ class Contracts(unittest.TestCase):
         path = (home or self.home) / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('\n'.join(json.dumps(dict(timestamp=TS, **row)) for row in rows) + '\n')
+        return path
+
+    def write_zstd(self, relative, rows, home=None):
+        path = (home or self.home) / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = '\n'.join(json.dumps(row, ensure_ascii=False) for row in rows) + '\n'
+        subprocess.run(['zstd', '-q', '-o', str(path), '-'], input=raw.encode(), check=True)
         return path
 
     def test_codex_usage_includes_reasoning_once_and_preserves_legacy_turns(self):
@@ -537,6 +549,62 @@ class Contracts(unittest.TestCase):
         self.addCleanup(con.close)
         self.assertTrue(query(con,'/api/meta',{})['writable'])
         self.assertFalse(query(con,'/api/meta',{},writable=False)['writable'])
+
+    @unittest.skipUnless(shutil.which('zstd'),'需要系统 zstd 命令')
+    def test_dsh_compressed_session_usage_turns_and_machine_context(self):
+        session='.dsh/sessions/--Users-clark-proj--/session-abc/session.v3.jsonl.zstd'
+        self.write_zstd(session,[
+            dict(type='session',id='session-abc',createdAt=DSH_TIME,cwd='/tmp/proj',delegationDepth=0),
+            dict(type='user/message',time=DSH_TIME,data=dict(content=[dict(type='text',text='DSHWORD 问题')],source=dict(kind='user'),role='user',id='u1')),
+            dict(type='user/message',time=DSH_TIME+1,data=dict(content=[dict(type='text',text='PLUGINWORD 上下文')],source=dict(kind='plugin'),role='user',id='p1')),
+            dict(type='assistant/message',time=DSH_TIME+2,data=dict(turn=1,step=1,message=dict(role='assistant',id='a1',
+                 source=dict(kind='model',provider='local',model='dsh-model'),
+                 content=[dict(type='reasoning',text='先想想'),dict(type='tool-call',id='c1',name='read',arguments='{"file_path": "/tmp/a"}')]),
+                 usage=dict(inputTokens=10,outputTokens=4,cacheReadTokens=2,totalTokens=16))),
+            dict(type='tool/result',time=DSH_TIME+3,data=dict(turn=1,step=1,message=dict(source=dict(kind='tool',callId='c1'),
+                 content=[dict(type='tool-result',toolCallId='c1',content=[dict(type='text',text='TOOLTEXT')])]))),
+            dict(type='assistant/message',time=DSH_TIME+4,data=dict(turn=1,step=2,message=dict(role='assistant',id='a2',
+                 source=dict(kind='model',provider='local',model='dsh-model'),
+                 content=[dict(type='text',text='DSHANSEWR')]),usage=dict(inputTokens=20,outputTokens=6,cacheReadTokens=1))),
+            dict(type='compaction/summary',time=DSH_TIME+5,data=dict(compactionId='cmp1',model='dsh-model',
+                 summary=[dict(type='text',text='SUMMARYWORD 摘要')],usage=dict(inputTokens=100,outputTokens=50))),
+        ])
+        self.write_zstd('.dsh/sessions/--Users-clark-proj--/session-abc/session.jsonl.zstd',[
+            dict(type='session',id='session-abc',createdAt=DSH_TIME),
+            dict(type='user/message',time=DSH_TIME,data=dict(content=[dict(type='text',text='LEGACYWORD')],source=dict(kind='user'),role='user',id='old')),
+        ])
+        data=collect(self.home)
+        self.assertEqual(data.sources['dsh'],1)
+        self.assertEqual([t['session'] for t in data.turns],['session-abc','session-abc'])
+        self.assertEqual(data.turns[0]['input'],'DSHWORD 问题')
+        self.assertEqual([p['kind'] for p in data.turns[0]['output']],['上下文','思考','工具调用','工具结果','正文'])
+        self.assertEqual(data.turns[0]['output'][2]['text'],'read\n{\n  "file_path": "/tmp/a"\n}')
+        self.assertEqual(data.turns[0]['model'],'dsh-model')
+        self.assertEqual(data.turns[1]['input'],'SUMMARYWORD 摘要')
+        self.assertFalse(data.turns[1].get('words',True))
+        dsh=[u for u in data.usage if u['agent']=='dsh']
+        self.assertEqual(len(dsh),3)
+        self.assertEqual([sum(u[field] for u in dsh) for field in ('new','out','cr','msgs')],[130,60,3,3])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual(query(con,'/api/search',dict(q='LEGACYWORD'))['total'],0)
+        self.assertEqual(query(con,'/api/search',dict(q='DSHANSEWR'))['total'],1)
+        self.assertEqual(query(con,'/api/search',dict(q='PLUGINWORD'))['total'],1)
+        terms={w['term'] for w in query(con,'/api/words',dict(limit='200'))['words']}
+        self.assertIn('dshword',terms)
+        for excluded in ('pluginword','summaryword','legacyword'):
+            self.assertNotIn(excluded,terms)
+
+    def test_dsh_without_zstd_command_warns_and_skips(self):
+        path=self.home/'.dsh/sessions/--proj--/session-x/session.v3.jsonl.zstd'
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_bytes(b'')
+        with mock.patch.object(stats_data,'ZSTD',None):
+            data=collect(self.home)
+        self.assertEqual(data.turns,[])
+        self.assertTrue(any('zstd' in warning for warning in data.warnings))
 
 
 if __name__=='__main__':
