@@ -141,7 +141,9 @@ class Dataset:
             self.warnings.append(f'{agent}/{session} 用量缺少有效时间，已跳过')
             return
         values = usage_values(agent, usage)
-        event = dict(agent=agent, session=session, model=model or 'unknown', day=ts[:10], **dict(zip(FIELDS, values)))
+        event = dict(agent=agent, session=session, model=model or 'unknown', day=ts[:10],
+                     key=key if isinstance(key, str) else json.dumps(key, ensure_ascii=False),
+                     **dict(zip(FIELDS, values)))
         self.usage.append(event)
         self.seen[identity] = event
 
@@ -325,24 +327,34 @@ class Dataset:
             con.close()
 
 
-def collect(home=None):
-    home = Path(home or Path.home()).resolve()
-    data = Dataset()
+def discover(home=None):
+    root = Path(home or Path.home()).resolve()
     patterns = {'claude': '.claude/projects/**/*.jsonl', 'codex': '.codex/sessions/**/*.jsonl',
                 'pi': '.pi/agent/sessions/**/*.jsonl', 'grok': '.grok/sessions/**/updates.jsonl'}
+    found = []
     for agent, pattern in patterns.items():
-        paths = set(home.glob(pattern))
+        paths = set(root.glob(pattern))
         if agent == 'codex':
-            paths.update(home.glob('.codex/archived_sessions/**/*.jsonl'))
-        for path in sorted(paths):
-            try:
-                data.read_file(agent, path)
-            except (OSError, ValueError, TypeError, AttributeError) as error:
-                data.warnings.append(f'{agent}/{path.name}: {error}')
-    db = home / '.local/share/opencode/opencode.db'
+            paths.update(root.glob('.codex/archived_sessions/**/*.jsonl'))
+        found.extend((agent, path) for path in sorted(paths))
+    db = root / '.local/share/opencode/opencode.db'
     if db.exists():
+        found.append(('opencode', db))
+    return found
+
+
+def read_agent(data, agent, path):
+    if agent == 'opencode':
+        data.read_opencode(path)
+    else:
+        data.read_file(agent, path)
+
+
+def collect(home=None):
+    data = Dataset()
+    for agent, path in discover(home):
         try:
-            data.read_opencode(db)
-        except (sqlite3.Error, ValueError, OSError, TypeError, AttributeError) as error:
-            data.warnings.append(f'opencode: {error}')
+            read_agent(data, agent, path)
+        except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error) as error:
+            data.warnings.append(f'{agent}/{path.name}: {error}')
     return data

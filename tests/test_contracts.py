@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -7,9 +8,10 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from stats_data import Dataset, collect, usage_values
-from stats_server import (LOOPBACK, Handler, allowed_hosts, clean_remotes, connect, excluded_words,
-                          load_remotes, period, query, rebuild, remotes_payload, save_excluded,
-                          save_remotes)
+from stats_server import (LOOPBACK, Handler, allowed_hosts, clean_remotes, close_sources, connect,
+                          excluded_words, load_remotes, open_sources, period, query, rebuild,
+                          remote_path, remote_status, remotes_payload, save_excluded, save_remotes,
+                          sync_remote, update_index)
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -264,6 +266,27 @@ class Contracts(unittest.TestCase):
         self.assertEqual(period('week',2,today)[2],['2025-12-22','2025-12-29'])
         self.assertEqual(len(period('day',14,today)[2]),14)
 
+    def test_search_filters_by_user_input_length(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='甲乙丙丁戊')),
+            dict(type='message',id='v',message=dict(role='user',content='甲乙丙')),
+            dict(type='message',id='w',message=dict(role='user',content='甲乙丙丁戊己庚辛壬癸')),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual(query(con,'/api/search',dict(q='甲乙'))['total'],3)
+        self.assertEqual(query(con,'/api/search',dict(q='甲乙',minlen='4'))['total'],2)
+        self.assertEqual(query(con,'/api/search',dict(q='甲乙',minlen='5',maxlen='9'))['total'],1)
+        self.assertEqual(query(con,'/api/search',dict(q='甲乙',maxlen='3'))['total'],1)
+        self.assertEqual(query(con,'/api/search',dict(minlen='4'))['total'],2)
+        self.assertEqual(query(con,'/api/search',dict(maxlen='3'))['total'],1)
+        with self.assertRaises(ValueError):
+            query(con,'/api/search',dict(minlen='-1'))
+        with self.assertRaises(ValueError):
+            query(con,'/api/search',dict(maxlen='x'))
+
     def test_export_serves_usage_and_paged_turns(self):
         self.write('.pi/agent/sessions/a.jsonl',[
             dict(type='message',id='u',message=dict(role='user',content='导出 甲')),
@@ -285,6 +308,12 @@ class Contracts(unittest.TestCase):
         self.assertIsNotNone(first['cursor'])
         self.assertIsInstance(first['turns'][0]['output'],list)
         self.assertTrue(first['turns'][0]['terms'])
+        fingerprint=first['turns'][0]['fingerprint']
+        self.assertTrue(fingerprint)
+        rebuild(db,self.home)
+        con2=connect(db)
+        self.addCleanup(con2.close)
+        self.assertEqual(query(con2,'/api/export',dict(section='turns',limit='1'))['turns'][0]['fingerprint'],fingerprint)
         second=query(con,'/api/export',dict(section='turns',limit='1',cursor=str(first['cursor'])))
         self.assertEqual(len(second['turns']),1)
         self.assertIsNone(second['cursor'])
@@ -314,128 +343,164 @@ class Contracts(unittest.TestCase):
         (self.home/'broken.json').write_text('{nope',encoding='utf-8')
         self.assertEqual(load_remotes(self.home/'broken.json'),[])
 
-    def test_remote_import_merges_usage_sessions_and_words(self):
+    def remote_log(self, home, rows):
+        return self.write('.pi/agent/sessions/a.jsonl', rows, home=home)
+
+    def remote_fetch(self, index):
+        remote_con = connect(index)
+        self.addCleanup(remote_con.close)
+        calls = []
+        def fetch(remote, path):
+            calls.append(path)
+            parsed = urlsplit(path)
+            return query(remote_con, parsed.path, {k: v[-1] for k, v in parse_qs(parsed.query).items()})
+        return fetch, calls
+
+    def test_incremental_update_only_reindexes_changed_files(self):
+        file_a=self.remote_log(self.home,[
+            dict(type='message',id='u1',message=dict(role='user',content='增量甲')),
+            dict(type='message',id='a1',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=5,output=2))),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual(query(con,'/api/meta',{})['turns'],1)
+        before=file_a.stat()
+        with file_a.open('a',encoding='utf-8') as handle:
+            handle.write(json.dumps(dict(timestamp=TS,type='message',id='u2',message=dict(role='user',content='追加乙')))+'\n')
+        os.utime(file_a,(before.st_atime,before.st_mtime))
+        self.write('.pi/agent/sessions/b.jsonl',[
+            dict(type='message',id='u1',message=dict(role='user',content='新增丙')),
+        ])
+        changed=update_index(db,self.home)
+        self.assertGreaterEqual(changed,2)
+        self.assertEqual(query(con,'/api/meta',{})['turns'],3)
+        self.assertEqual(query(con,'/api/search',dict(q='追加乙'))['total'],1)
+        self.assertEqual(query(con,'/api/search',dict(q='新增丙'))['total'],1)
+        self.assertEqual(update_index(db,self.home),0)
+        (self.home/'.pi/agent/sessions/b.jsonl').unlink()
+        update_index(db,self.home)
+        self.assertEqual(query(con,'/api/meta',{})['turns'],2)
+        self.assertEqual(query(con,'/api/search',dict(q='新增丙'))['total'],0)
+
+    def test_remote_sync_incremental_and_boundary_fallback(self):
         remote_home=self.home/'remote'
         remote_home.mkdir()
-        self.write('.pi/agent/sessions/r.jsonl',[
-            dict(type='message',id='u',message=dict(role='user',content='REMOTEWORD 远端问题')),
-            dict(type='message',id='a',message=dict(role='assistant',model='remote-model',content=[dict(type='text',text='远端回答')],usage=dict(input=7,output=3))),
-        ],home=remote_home)
-        remote_db=self.home/'remote.sqlite'
-        rebuild(remote_db,remote_home)
-        remote_con=connect(remote_db)
-        self.addCleanup(remote_con.close)
-        def fetch(remote,path):
-            parsed=urlsplit(path)
-            return query(remote_con,parsed.path,{k:v[-1] for k,v in parse_qs(parsed.query).items()})
-        local_home=self.home/'local'
-        local_home.mkdir()
-        self.write('.pi/agent/sessions/l.jsonl',[
-            dict(type='message',id='u',message=dict(role='user',content='LOCALWORD 本地问题')),
-            dict(type='message',id='a',message=dict(role='assistant',model='local-model',content=[dict(type='text',text='本地回答')],usage=dict(input=2,output=1))),
-        ],home=local_home)
-        remote=dict(host='desk.local',port=28763,usage=True,search=True,words=True)
-        db=self.home/'merged.sqlite'
-        rebuild(db,local_home,[remote],fetch)
-        con=connect(db)
-        self.addCleanup(con.close)
-        meta=query(con,'/api/meta',{})
-        self.assertEqual(meta['turns'],2)
-        self.assertEqual(meta['sessions'],2)
-        self.assertIsNone(meta['remotes'][0]['error'])
-        self.assertEqual(meta['remotes'][0]['turns'],1)
-        self.assertEqual(query(con,'/api/search',dict(q='REMOTEWORD'))['total'],1)
-        self.assertEqual(query(con,'/api/search',dict(q='LOCALWORD'))['total'],1)
-        terms={w['term'] for w in query(con,'/api/words',dict(limit='100'))['words']}
-        self.assertIn('remoteword',terms)
-        self.assertIn('localword',terms)
-        turn=query(con,'/api/turn',dict(id=query(con,'/api/search',dict(q='REMOTEWORD'))['rows'][0]['id']))
-        self.assertTrue(turn['source'].startswith('desk.local:28763 · '))
-        self.assertEqual(turn['output'],[dict(kind='正文',text='远端回答')])
-        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'))['rows']),13)
-        config=self.home/'remotes.json'
-        save_remotes([remote],config)
-        self.assertEqual(remotes_payload(con,config)['remotes'][0]['status']['turns'],1)
-
-    def test_remote_import_can_limit_to_usage(self):
-        remote_home=self.home/'usage-only'
-        remote_home.mkdir()
-        self.write('.pi/agent/sessions/a.jsonl',[
-            dict(type='message',id='u',message=dict(role='user',content='ONLYUSAGEWORD')),
-            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=4,output=2))),
-        ],home=remote_home)
-        remote_db=self.home/'usage-only.sqlite'
-        rebuild(remote_db,remote_home)
-        remote_con=connect(remote_db)
-        self.addCleanup(remote_con.close)
-        def fetch(remote,path):
-            parsed=urlsplit(path)
-            return query(remote_con,parsed.path,{k:v[-1] for k,v in parse_qs(parsed.query).items()})
-        local_home=self.home/'usage-local'
-        local_home.mkdir()
-        self.write('.pi/agent/sessions/b.jsonl',[
-            dict(type='message',id='u',message=dict(role='user',content='LOCALONLY')),
-        ],home=local_home)
-        db=self.home/'usage-merged.sqlite'
-        rebuild(db,local_home,[dict(host='r.local',port=1,usage=True,search=False,words=False)],fetch)
-        con=connect(db)
-        self.addCleanup(con.close)
-        self.assertEqual(query(con,'/api/meta',{})['turns'],1)
-        self.assertEqual(query(con,'/api/search',dict(q='ONLYUSAGEWORD'))['total'],0)
-        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'))['rows']),6)
-        self.assertEqual(query(con,'/api/meta',{})['remotes'][0]['turns'],0)
-
-    def test_disabled_remote_is_kept_in_config_but_not_merged(self):
-        remote_home=self.home/'toggle-remote'
-        remote_home.mkdir()
-        self.write('.pi/agent/sessions/a.jsonl',[
-            dict(type='message',id='u',message=dict(role='user',content='TOGGLEWORD')),
-            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=4,output=2))),
-        ],home=remote_home)
-        remote_db=self.home/'toggle-remote.sqlite'
-        rebuild(remote_db,remote_home)
-        remote_con=connect(remote_db)
-        self.addCleanup(remote_con.close)
-        def fetch(remote,path):
-            parsed=urlsplit(path)
-            return query(remote_con,parsed.path,{k:v[-1] for k,v in parse_qs(parsed.query).items()})
-        local_home=self.home/'toggle-local'
-        local_home.mkdir()
-        self.write('.pi/agent/sessions/b.jsonl',[
-            dict(type='message',id='u',message=dict(role='user',content='LOCALTOGGLE')),
-        ],home=local_home)
-        off=dict(host='toggle.local',port=9,usage=True,search=True,words=True,enabled=False)
-        disabled_db=self.home/'toggle-off.sqlite'
-        rebuild(disabled_db,local_home,[off],fetch)
-        con=connect(disabled_db)
-        self.addCleanup(con.close)
-        self.assertEqual(query(con,'/api/meta',{})['turns'],1)
-        self.assertEqual(query(con,'/api/meta',{})['remotes'],[])
-        self.assertEqual(query(con,'/api/search',dict(q='TOGGLEWORD'))['total'],0)
-        enabled_db=self.home/'toggle-on.sqlite'
-        rebuild(enabled_db,local_home,[dict(off,enabled=True)],fetch)
-        con=connect(enabled_db)
-        self.addCleanup(con.close)
-        self.assertEqual(query(con,'/api/meta',{})['turns'],2)
-        self.assertEqual(query(con,'/api/search',dict(q='TOGGLEWORD'))['total'],1)
-        self.assertIsNone(query(con,'/api/meta',{})['remotes'][0]['error'])
-
-    def test_remote_import_failure_keeps_local_data_and_warns(self):
-        self.write('.pi/agent/sessions/a.jsonl',[
-            dict(type='message',id='u',message=dict(role='user',content='KEEPWORD')),
-            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=1,output=1))),
+        self.remote_log(remote_home,[
+            dict(type='message',id='u1',message=dict(role='user',content='REMOTE 甲')),
+            dict(type='message',id='a1',message=dict(role='assistant',model='rm',content=[dict(type='text',text='甲答')],usage=dict(input=5,output=2))),
         ])
+        remote_index=self.home/'remote-index.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,calls=self.remote_fetch(remote_index)
+        remote=dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'store'
+        directory.mkdir()
+        first=sync_remote(remote,directory,fetch)
+        self.assertIsNone(first['error'])
+        self.assertEqual(first['turns'],1)
+        self.assertTrue(remote_path(remote,directory).exists())
+        appended=[
+            dict(type='message',id='u2',message=dict(role='user',content='REMOTE 乙')),
+            dict(type='message',id='a2',message=dict(role='assistant',model='rm',content=[dict(type='text',text='乙答')],usage=dict(input=3,output=1))),
+        ]
+        with (remote_home/'.pi/agent/sessions/a.jsonl').open('a',encoding='utf-8') as handle:
+            handle.write('\n'.join(json.dumps(dict(timestamp=TS,**row)) for row in appended)+'\n')
+        update_index(remote_index,remote_home)
+        calls.clear()
+        second=sync_remote(remote,directory,fetch)
+        self.assertEqual(second['turns'],2)
+        self.assertTrue(any('limit=50&cursor=1' in path for path in calls))
+        self.assertFalse(any('limit=50&cursor=0' in path for path in calls))
+        (remote_home/'.pi/agent/sessions/a.jsonl').write_text(
+            json.dumps(dict(timestamp=TS,type='message',id='x1',message=dict(role='user',content='REMOTE 丙')))+'\n')
+        rebuild(remote_index,remote_home)
+        fetch,calls=self.remote_fetch(remote_index)
+        third=sync_remote(remote,directory,fetch)
+        self.assertIsNone(third['error'])
+        self.assertEqual(third['turns'],1)
+        self.assertTrue(any('limit=50&cursor=0' in path for path in calls))
+        store=connect(remote_path(remote,directory))
+        self.addCleanup(store.close)
+        self.assertEqual(query(store,'/api/search',dict(q='REMOTE 丙'))['total'],1)
+        self.assertEqual(query(store,'/api/search',dict(q='REMOTE 甲'))['total'],0)
+
+    def test_remote_sync_failure_keeps_previous_data(self):
+        remote_home=self.home/'fail-remote'
+        remote_home.mkdir()
+        self.remote_log(remote_home,[
+            dict(type='message',id='u1',message=dict(role='user',content='KEEPFAR')),
+        ])
+        remote_index=self.home/'fail-index.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,_=self.remote_fetch(remote_index)
+        remote=dict(host='fail.local',port=9,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'fail-store'
+        directory.mkdir()
+        self.assertEqual(sync_remote(remote,directory,fetch)['turns'],1)
         def broken(remote,path):
             raise OSError('unreachable')
-        db=self.home/'index.sqlite'
-        rebuild(db,self.home,[dict(host='10.0.0.9',port=1,usage=True,search=True,words=True)],broken)
-        con=connect(db)
+        status=sync_remote(remote,directory,broken)
+        self.assertIn('unreachable',status['error'])
+        self.assertIn('unreachable',remote_status(remote,directory)['error'])
+        store=connect(remote_path(remote,directory))
+        self.addCleanup(store.close)
+        self.assertEqual(query(store,'/api/search',dict(q='KEEPFAR'))['total'],1)
+
+    def test_query_merges_local_and_enabled_remote_sources(self):
+        local_home=self.home/'merge-local'
+        local_home.mkdir()
+        self.remote_log(local_home,[
+            dict(type='message',id='u',message=dict(role='user',content='LOCALWORD 本地问题')),
+            dict(type='message',id='a',message=dict(role='assistant',model='local-model',content=[dict(type='text',text='本地回答')],usage=dict(input=2,output=1))),
+        ])
+        local_index=self.home/'merge-local.sqlite'
+        rebuild(local_index,local_home)
+        remote_home=self.home/'merge-remote'
+        remote_home.mkdir()
+        self.remote_log(remote_home,[
+            dict(type='message',id='u',message=dict(role='user',content='REMOTEWORD 远端问题')),
+            dict(type='message',id='a',message=dict(role='assistant',model='remote-model',content=[dict(type='text',text='远端回答')],usage=dict(input=7,output=3))),
+        ])
+        remote_index=self.home/'merge-remote.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,_=self.remote_fetch(remote_index)
+        remote=dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'merge-store'
+        directory.mkdir()
+        sync_remote(remote,directory,fetch)
+        config=self.home/'remotes.json'
+        save_remotes([remote],config)
+        con=connect(local_index)
         self.addCleanup(con.close)
-        meta=query(con,'/api/meta',{})
-        self.assertEqual(meta['turns'],1)
-        self.assertIn('unreachable',meta['remotes'][0]['error'])
-        self.assertTrue(any('汇入失败' in warning for warning in meta['warnings']))
-        self.assertEqual(query(con,'/api/search',dict(q='KEEPWORD'))['total'],1)
+        sources=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(sources))
+        meta=query(con,'/api/meta',{},sources=sources)
+        self.assertEqual(meta['turns'],2)
+        self.assertEqual(meta['sessions'],2)
+        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'),sources=sources)['rows']),13)
+        terms={w['term'] for w in query(con,'/api/words',dict(limit='100'),sources=sources)['words']}
+        self.assertIn('localword',terms)
+        self.assertIn('remoteword',terms)
+        search=query(con,'/api/search',dict(q='REMOTEWORD'),sources=sources)
+        self.assertEqual(search['total'],1)
+        remote_id=search['rows'][0]['id']
+        self.assertNotEqual(remote_id.split(':')[0],'local')
+        turn=query(con,'/api/turn',dict(id=remote_id),sources=sources)
+        self.assertTrue(turn['source'].startswith('desk.local:28763 · '))
+        self.assertEqual(turn['output'],[dict(kind='正文',text='远端回答')])
+        self.assertEqual(remotes_payload(directory,config)['remotes'][0]['status']['turns'],1)
+        save_remotes([dict(remote,enabled=False)],config)
+        disabled=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(disabled))
+        self.assertEqual(query(con,'/api/meta',{},sources=disabled)['turns'],1)
+        self.assertTrue(remote_path(remote,directory).exists())
+        save_remotes([dict(remote,search=False,words=False)],config)
+        limited=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(limited))
+        self.assertEqual(query(con,'/api/meta',{},sources=limited)['turns'],1)
+        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'),sources=limited)['rows']),13)
 
     def test_http_security_rejects_foreign_hosts_and_origins(self):
         self.assertTrue(fake_handler('127.0.0.1:18763').allowed())

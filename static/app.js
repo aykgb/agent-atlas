@@ -54,14 +54,19 @@ function renderRemotes() {
   $('remoteSummary').textContent = list.length ? '（' + list.length + ' 台' + (off ? ' · 停用 ' + off : '') + '）' : '（未配置）';
   $('remoteList').innerHTML = list.map((r, index) => {
     const tags = [r.usage && '用量', r.search && '会话', r.words && '词频'].filter(Boolean).map(esc).join(' · ');
-    const status = !r.enabled ? '<span class="subtle">已停用</span>' : r.status ? (r.status.error
+    const status = !r.enabled ? '<span class="subtle">已停用</span>' : r.status && r.status.error
       ? '<span class="remote-bad" title="' + esc(r.status.error) + '">同步失败</span>'
-      : '<span class="remote-good">' + number(r.status.turns) + ' 轮已同步</span>')
+      : r.status && r.status.turns ? '<span class="remote-good">' + number(r.status.turns) + ' 轮已同步</span>'
       : '<span class="subtle">未同步</span>';
-    return '<div class="remote-row"><label class="remote-switch"><input type="checkbox" data-toggle="' + index + '"' + (r.enabled ? ' checked' : '') + '> 启用</label><b>' + esc(r.host) + ':' + r.port + '</b><span class="subtle">' + tags + '</span>' + status + '<button class="text-button" data-index="' + index + '">移除</button></div>';
+    const sync = r.enabled ? '<button class="text-button" data-sync="' + index + '">同步</button>' : '';
+    return '<div class="remote-row"><label class="remote-switch"><input type="checkbox" data-toggle="' + index + '"' + (r.enabled ? ' checked' : '') + '> 启用</label><b>' + esc(r.host) + ':' + r.port + '</b><span class="subtle">' + tags + '</span>' + status + sync + '<button class="text-button" data-index="' + index + '">移除</button></div>';
   }).join('');
   $('remoteList').querySelectorAll('input[data-toggle]').forEach(box => box.addEventListener('change', () =>
     saveRemotes(state.remotes.map((r, index) => index === +box.dataset.toggle ? {...r, enabled: box.checked} : r))));
+  $('remoteList').querySelectorAll('button[data-sync]').forEach(button => button.addEventListener('click', () => {
+    const remote = state.remotes[+button.dataset.sync];
+    syncRemotes({host: remote.host, port: remote.port});
+  }));
   $('remoteList').querySelectorAll('button[data-index]').forEach(button => button.addEventListener('click', () =>
     saveRemotes(state.remotes.filter((_, index) => index !== +button.dataset.index))));
 }
@@ -73,11 +78,23 @@ async function loadRemotes() {
   }
   renderRemotes();
 }
-async function saveRemotes(list) {
+async function syncRemotes(target) {
+  try {
+    notice('正在增量同步远端索引…');
+    await api('/api/sync', {}, {method: 'POST', headers: {'X-Stats-Request': '1', 'Content-Type': 'application/json'}, body: JSON.stringify(target || {})});
+    await metadata();
+    state.page = 1;
+    await load();
+  } catch (error) { notice(error.message, true); }
+}
+async function saveRemotes(list, target) {
   try {
     state.remotes = (await api('/api/remotes', {}, {method: 'POST', headers: {'X-Stats-Request': '1', 'Content-Type': 'application/json'}, body: JSON.stringify({remotes: list})})).remotes;
     renderRemotes();
-    await resync();
+    if (target) return syncRemotes(target);
+    await metadata();
+    state.page = 1;
+    await load();
   } catch (error) { notice(error.message, true); }
 }
 async function metadata() {
@@ -199,7 +216,10 @@ async function loadTurn(detail, id) {
   }
 }
 function renderSearch(data) {
-  $('searchCount').textContent = number(data.total)+' 轮匹配'+(state.term ? ' · 输入词：'+state.term : ' · 空格分隔的关键词需全部命中');
+  const min=$('minLen').value, max=$('maxLen').value;
+  const length = min && max ? ' · 长度 '+min+'–'+max+' 字' : min ? ' · 长度 ≥'+min+' 字' : max ? ' · 长度 ≤'+max+' 字' : '';
+  const hint = state.term ? ' · 输入词：'+state.term : $('q').value.trim() ? ' · 空格分隔的关键词需全部命中' : ' · 按筛选条件匹配';
+  $('searchCount').textContent = number(data.total)+' 轮匹配'+hint+length;
   $('clearTerm').hidden = !state.term;
   $('results').innerHTML = data.rows.map(r => '<details class="turn" data-id="'+r.id+'"><summary><div class="turn-meta"><span class="badge">'+esc(r.agent)+'</span><span>'+esc(r.model)+'</span><span>'+esc(new Date(r.timestamp).toLocaleString('zh-CN'))+'</span></div><div class="preview">'+highlight(r.preview)+'</div>'+(r.match ? '<div class="match">'+highlight(r.match)+'</div>' : '')+'</summary><div class="turn-body"></div></details>').join('') || empty('没有找到匹配轮次。试试更短的关键词或扩大时间范围。');
   $('results').querySelectorAll('.turn').forEach(el => el.addEventListener('toggle',()=>loadTurn(el,el.dataset.id)));
@@ -240,7 +260,7 @@ async function load() {
     if ($('start').value && $('end').value && $('start').value > $('end').value) throw new Error('开始日期不能晚于结束日期');
     let result;
     if (tab==='usage') result=await api('/api/usage',{agent:$('agent').value,model:$('model').value,n:$('n').value,unit:$('unit').value});
-    else if (tab==='search') result=await api('/api/search',{...filters(),q:$('q').value,page:state.page,term:state.term});
+    else if (tab==='search') result=await api('/api/search',{...filters(),q:$('q').value,page:state.page,term:state.term,minlen:$('minLen').value,maxlen:$('maxLen').value});
     else result=await api('/api/words',{...filters(),limit:$('wordLimit').value});
     if (request!==state.request) return;
     ({usage:renderUsage,search:renderSearch,words:renderWords}[tab])(result);
@@ -258,7 +278,7 @@ function setTab(tab) {
   load();
 }
 document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
-for(const id of ['agent','model','n','unit','start','end','wordLimit']) $(id).addEventListener('change',()=>{state.page=1;load();});
+for(const id of ['agent','model','n','unit','start','end','wordLimit','minLen','maxLen']) $(id).addEventListener('change',()=>{state.page=1;load();});
 $('group').addEventListener('change',renderCharts);
 $('searchForm').addEventListener('submit',e=>{e.preventDefault();state.page=1;state.term='';load();});
 $('prev').addEventListener('click',()=>{state.page--;load();});
@@ -268,7 +288,7 @@ $('excludeAdd').addEventListener('click',addExcluded);
 $('excludeInput').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();addExcluded();}});
 $('allDates').addEventListener('click',()=>{$('start').value='';$('end').value='';state.page=1;load();});
 $('reset').addEventListener('click',()=>{
-  for(const id of ['agent','model','start','end','q']) $(id).value='';
+  for(const id of ['agent','model','start','end','q','minLen','maxLen']) $(id).value='';
   $('n').value=14;$('unit').value='day';state.page=1;state.term='';load();
 });
 async function resync() {
@@ -283,8 +303,14 @@ $('remoteForm').addEventListener('submit',event=>{
   const host=$('remoteHost').value.trim(), port=Number($('remotePort').value);
   if (!host || !Number.isInteger(port) || port<1 || port>65535) return notice('填写有效的主机与端口',true);
   $('remoteHost').value='';
-  saveRemotes([...(state.remotes||[]).filter(r=>r.host!==host||r.port!==port),{host,port,enabled:true,usage:$('remoteUsage').checked,search:$('remoteSearch').checked,words:$('remoteWords').checked}]);
+  saveRemotes([...(state.remotes||[]).filter(r=>r.host!==host||r.port!==port),{host,port,enabled:true,usage:$('remoteUsage').checked,search:$('remoteSearch').checked,words:$('remoteWords').checked}],{host,port});
 });
+let lengthTimer;
+for(const id of ['minLen','maxLen']) $(id).addEventListener('input',()=>{
+  clearTimeout(lengthTimer);
+  lengthTimer=setTimeout(()=>{state.page=1;state.term='';load();},350);
+});
+for(const id of ['minLen','maxLen']) $(id).addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();state.page=1;state.term='';load();}});
 $('remoteWords').addEventListener('change',()=>{if($('remoteWords').checked)$('remoteSearch').checked=true;});
 $('remoteSearch').addEventListener('change',()=>{if(!$('remoteSearch').checked)$('remoteWords').checked=false;});
 metadata().then(load).catch(error=>notice(error.message,true));

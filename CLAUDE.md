@@ -7,12 +7,13 @@
 - `stats_server.py` — HTTP 服务，默认 127.0.0.1:18763；建索引与查询
 - `stats_data.py` — 日志解析、去重与聚合（五类 agent 日志）
 - `stats-today.py` — CLI，直接读日志，不依赖索引
-- `server.sh` — 服务控制：start / stop / restart / status，PID 与日志存于 .stats/
+- `server.sh` / `server.ps1` — 服务控制：start / stop / restart / status（macOS / Windows），PID 与日志存于 .stats/
 - `static/` — 前端：index.html、app.js、style.css
 - `tests/test_contracts.py` — 契约测试
 - `README.md` — 用法、数据来源与口径（解析与聚合逻辑的规格）、验证
 - `remotes.json` — 远端汇入配置（运行时生成，不入库）
-- `.stats/` — 派生索引与服务 PID/日志，可删，下次启动自动重建
+- `words-exclude.txt` — 词频排除词（运行时生成，不入库）
+- `.stats/` — 派生索引（本机 index*.sqlite、每台远端 remote-*.sqlite）与服务 PID/日志，可删，下次启动自动重建（远端需重新同步）
 
 <important if="you need to run commands to install, start, or verify">
 
@@ -21,6 +22,7 @@
 | `uv sync` | 安装依赖到 .venv |
 | `.venv/bin/python stats_server.py` | 启动服务（端口 18763） |
 | `./server.sh start \| stop \| restart \| status` | 服务控制（后台运行，日志 .stats/server.log） |
+| `.\server.ps1 start \| stop \| restart \| status` | 同上（Windows） |
 | `.venv/bin/python stats_server.py --reindex` | 重建索引后退出 |
 | `.venv/bin/python stats-today.py [--week \| --days N]` | CLI 统计 |
 | `.venv/bin/python -m unittest discover -s tests -v` | 运行测试 |
@@ -33,7 +35,7 @@
 
 <important if="you are about to commit">
 - 先运行 README「验证」一节的两条命令（测试 + node --check），全部通过。
-- 提交内容不含本地 agent session 数据（.stats/ 索引、words-exclude.txt、日志原文）；测试夹具只用合成内容。
+- 提交内容不含本地 agent session 数据（.stats/ 索引、words-exclude.txt、remotes.json、日志原文）；测试夹具只用合成内容。
 </important>
 
 <important if="you are adding dependencies or frontend resources">
@@ -45,11 +47,17 @@
 - 写操作（POST）仅限本机：客户端地址、Host 与代理转发头均须为回环。
 </important>
 
-<important if="you are modifying remote import (remotes.json, /api/export, import_remote)">
-- 汇入由本地服务主动 GET 远端 `/api/export` 并写入本地索引；远端不可达时重建必须继续，只在 warnings 与 meta.remotes 标记失败。
-- `remotes.json` 是本地个人配置（gitignore）；POST /api/remotes 与其它写操作一样仅限本机。
+<important if="you are modifying remote import (remotes.json, /api/export, sync_remote)">
+- 本机索引只含本机数据；每台远端一个 `.stats/remote-*.sqlite`。停用只在查询时排除、不删数据；移除才删文件。
+- 汇入由本地服务主动 GET 远端 `/api/export`；按 cursor + 轮次指纹增量，远端重建时自动全量重拉；失败整事务回滚并记入该远端库的 `sync_error`。
+- 查询时合并本机与启用中的远端（用量/会话/词频按勾选）；轮次 id 形如 `<key>:<id>`，详情按前缀路由。
+- `remotes.json` 是本地个人配置（gitignore）；POST /api/remotes、/api/sync 与其它写操作一样仅限本机。
 - 勾选 words 隐含 search：词频轮次必须可搜索、可打开。
-- 每台远端有 enabled 开关，停用只保留配置不汇入；状态记录在 meta.remotes（仅启用中的远端）。
+</important>
+
+<important if="you are modifying the local index or refresh (rebuild, update_index)">
+- 刷新为增量：meta 的 `indexed_at`（毫秒水位）加 `files(path,size)` 判断，只重解析变化文件；首次运行、schema 升级与 `--reindex` 才全量重建。
+- 用量按文件存 `file_usage`、查询前聚合；跨文件重复按 `(agent,key)` 取 MAX，保持旧口径。
 </important>
 
 <important if="you are reading or writing agent logs or the index">
