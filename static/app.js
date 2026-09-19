@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const colors = ['#6484d8', '#71b3a2', '#b49acb', '#e2b274', '#de8999', '#87acc8', '#a5b677', '#9299ad'];
-const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: []};
+const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: [], sessionPage: 1, session: null};
 const number = n => Number(n || 0).toLocaleString('en-US');
 const compact = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : number(n);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -255,6 +255,7 @@ function renderCharts() {
     return '<div class="pie-row" title="'+number(v)+' tokens"><i class="swatch" style="background:'+colors[i]+'"></i><span class="pie-name">'+esc(k)+'</span><span>'+compact(v)+'</span><strong>'+(v/total*100).toFixed(1)+'%</strong></div>';
   }).join('');
 }
+const OUTPUT_LABELS = {'思考':'thinking','工具调用':'tool call','工具结果':'tool result','正文':'text','上下文':'context','过程':'process'};
 async function loadTurn(detail, id) {
   if (!detail.open || detail.dataset.loaded) return;
   const body = detail.querySelector('.turn-body');
@@ -262,20 +263,47 @@ async function loadTurn(detail, id) {
   detail.dataset.loaded = 'loading';
   try {
     const turn = await api('/api/turn',{id});
-    const categories = new Map();
-    turn.output.forEach((part,index) => {
-      if (!categories.has(part.kind)) categories.set(part.kind,[]);
-      categories.get(part.kind).push({text:part.text, index:index+1});
-    });
+    const parts = turn.output.map((part,index) => '<details class="part"><summary><span>第 '+(index+1)+' 段 · '+number(part.text.length)+' 字符</span><span class="kind-tag">'+esc(OUTPUT_LABELS[part.kind]||part.kind)+'</span></summary><pre>'+highlight(part.text)+'</pre></details>').join('');
     body.innerHTML = '<details open><summary>用户输入</summary><pre>'+highlight(turn.input)+'</pre></details>' +
-      [...categories.entries()].map(([kind,parts]) => '<details><summary>'+esc(kind)+' · '+parts.length+' 段</summary>' +
-      parts.map(p => '<details><summary>第 '+p.index+' 段 · '+number(p.text.length)+' 字符</summary><pre>'+highlight(p.text)+'</pre></details>').join('')+'</details>').join('') +
-      (!turn.output.length ? '<p>该轮尚无可见输出。</p>' : '') +
+      (turn.output.length ? '<details class="response"><summary>Agent 响应 · '+turn.output.length+' 段</summary><div class="response-body">'+parts+'</div></details>' : '<p>该轮尚无可见输出。</p>') +
       '<div class="source">会话 '+esc(turn.session)+'<br>来源 '+esc(turn.source)+'</div>';
     detail.dataset.loaded = 'yes';
   } catch(error) {
     body.textContent = error.message + '；收起后重新展开可重试。'; delete detail.dataset.loaded;
   }
+}
+function showSessionList() {
+  state.session = null;
+  $('sessionListView').hidden = false;
+  $('sessionDetail').hidden = true;
+}
+function renderSessions(data) {
+  const rows = data.rows || [];
+  $('sessionCount').textContent = number(data.total)+' 个会话 · 按创建时间倒序'+(data.total ? ' · 第 '+data.page+' / '+data.pages+' 页' : '');
+  $('sessionList').innerHTML = rows.map((s,index) =>
+    '<button class="session-row" data-index="'+index+'"><span class="badge">'+esc(s.agent)+'</span>'+
+    '<span class="session-name">'+esc(s.session)+'</span><span class="subtle">'+number(s.turns)+' 轮</span>'+
+    '<span class="subtle">'+esc(s.label)+'</span><span class="session-date">'+esc(s.first ? new Date(s.first).toLocaleString('zh-CN') : '')+'</span></button>').join('')
+    || empty('当前筛选下没有会话。');
+  $('sessionList').querySelectorAll('.session-row').forEach(button =>
+    button.addEventListener('click',()=>openSession(rows[+button.dataset.index])));
+  $('sessionPage').textContent = data.total ? data.page+' / '+data.pages : '0 / 0';
+  $('sessionPrev').disabled = data.page <= 1; $('sessionNext').disabled = data.page >= data.pages;
+}
+async function openSession(target) {
+  notice('正在读取会话…');
+  try {
+    const data = await api('/api/session',{key:target.key,agent:target.agent,session:target.session});
+    state.session = data;
+    $('sessionListView').hidden = true;
+    $('sessionDetail').hidden = false;
+    $('sessionMeta').innerHTML = '<span class="badge">'+esc(data.agent)+'</span><b>'+esc(data.session)+'</b>'+
+      '<span class="subtle">'+number(data.turns.length)+' 轮 · '+esc(new Date(data.first).toLocaleString('zh-CN'))+' — '+esc(new Date(data.last).toLocaleString('zh-CN'))+'</span>'+
+      '<span class="subtle">来源 '+esc(data.source)+'</span>';
+    $('sessionTurns').innerHTML = data.turns.map(t => '<details class="turn" data-id="'+t.id+'"><summary><div class="turn-meta"><span class="badge">'+esc(data.agent)+'</span><span>'+esc(t.model)+'</span><span>'+esc(new Date(t.timestamp).toLocaleString('zh-CN'))+'</span></div><div class="preview">'+highlight(t.preview)+'</div></summary><div class="turn-body"></div></details>').join('') || empty('该会话没有可显示的轮次。');
+    $('sessionTurns').querySelectorAll('.turn').forEach(el => el.addEventListener('toggle',()=>loadTurn(el,el.dataset.id)));
+    notice();
+  } catch(error) { notice(error.message, true); }
 }
 function renderSearch(data) {
   const min=$('minLen').value, max=$('maxLen').value;
@@ -283,8 +311,14 @@ function renderSearch(data) {
   const hint = state.term ? ' · 输入词：'+state.term : $('q').value.trim() ? ' · 空格分隔的关键词需全部命中' : ' · 按筛选条件匹配';
   $('searchCount').textContent = number(data.total)+' 轮匹配'+hint+length;
   $('clearTerm').hidden = !state.term;
-  $('results').innerHTML = data.rows.map(r => '<details class="turn" data-id="'+r.id+'"><summary><div class="turn-meta"><span class="badge">'+esc(r.agent)+'</span><span>'+esc(r.model)+'</span><span>'+esc(new Date(r.timestamp).toLocaleString('zh-CN'))+'</span></div><div class="preview">'+highlight(r.preview)+'</div>'+(r.match ? '<div class="match">'+highlight(r.match)+'</div>' : '')+'</summary><div class="turn-body"></div></details>').join('') || empty('没有找到匹配轮次。试试更短的关键词或扩大时间范围。');
+  $('results').innerHTML = data.rows.map(r => '<details class="turn" data-id="'+r.id+'"><summary><div class="turn-meta"><span class="badge">'+esc(r.agent)+'</span><span>'+esc(r.model)+'</span><span>'+esc(new Date(r.timestamp).toLocaleString('zh-CN'))+'</span><button class="text-button session-link" data-id="'+esc(r.id)+'" data-agent="'+esc(r.agent)+'" data-session="'+esc(r.session)+'">完整会话</button></div><div class="preview">'+highlight(r.preview)+'</div>'+(r.match ? '<div class="match">'+highlight(r.match)+'</div>' : '')+'</summary><div class="turn-body"></div></details>').join('') || empty('没有找到匹配轮次。试试更短的关键词或扩大时间范围。');
   $('results').querySelectorAll('.turn').forEach(el => el.addEventListener('toggle',()=>loadTurn(el,el.dataset.id)));
+  $('results').querySelectorAll('.session-link').forEach(button => button.addEventListener('click',event => {
+    event.preventDefault(); event.stopPropagation();
+    const key = button.dataset.id.split(':')[0];
+    setTab('sessions');
+    openSession({key, agent: button.dataset.agent, session: button.dataset.session});
+  }));
   $('page').textContent = data.total ? data.page+' / '+data.pages : '0 / 0';
   $('prev').disabled = data.page <= 1; $('next').disabled = data.page >= data.pages;
 }
@@ -323,9 +357,10 @@ async function load() {
     let result;
     if (tab==='usage') result=await api('/api/usage',{agent:$('agent').value,model:$('model').value,n:$('n').value,unit:$('unit').value});
     else if (tab==='search') result=await api('/api/search',{...filters(),q:$('q').value,page:state.page,term:state.term,minlen:$('minLen').value,maxlen:$('maxLen').value});
+    else if (tab==='sessions') result=await api('/api/sessions',{agent:$('agent').value,page:state.sessionPage});
     else result=await api('/api/words',{...filters(),limit:$('wordLimit').value});
     if (request!==state.request) return;
-    ({usage:renderUsage,search:renderSearch,words:renderWords}[tab])(result);
+    ({usage:renderUsage,search:renderSearch,sessions:renderSessions,words:renderWords}[tab])(result);
     notice();
   } catch(error) {if(request===state.request) notice(error.message,true);}
 }
@@ -335,12 +370,14 @@ function setTab(tab) {
     b.classList.toggle('active',b.dataset.tab===tab);
     if(b.dataset.tab===tab) b.setAttribute('aria-current','page'); else b.removeAttribute('aria-current');
   });
-  for(const name of ['usage','search','words']) $(name).hidden=name!==tab;
-  $('periodControls').hidden=tab!=='usage'; $('dateControls').hidden=tab==='usage';
+  for(const name of ['usage','search','sessions','words']) $(name).hidden=name!==tab;
+  $('periodControls').hidden=tab!=='usage'; $('dateControls').hidden=tab!=='search'&&tab!=='words';
+  $('model').closest('label').hidden=tab==='sessions';
+  if(tab==='sessions') showSessionList();
   load();
 }
 document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
-for(const id of ['agent','model','n','unit','start','end','wordLimit','minLen','maxLen']) $(id).addEventListener('change',()=>{state.page=1;load();});
+for(const id of ['agent','model','n','unit','start','end','wordLimit','minLen','maxLen']) $(id).addEventListener('change',()=>{state.page=1;state.sessionPage=1;load();});
 $('group').addEventListener('change',renderCharts);
 $('bars').addEventListener('dblclick',event=>{
   const rect=event.target.closest('rect');
@@ -349,6 +386,9 @@ $('bars').addEventListener('dblclick',event=>{
 $('searchForm').addEventListener('submit',e=>{e.preventDefault();state.page=1;state.term='';load();});
 $('prev').addEventListener('click',()=>{state.page--;load();});
 $('next').addEventListener('click',()=>{state.page++;load();});
+$('sessionPrev').addEventListener('click',()=>{state.sessionPage--;load();});
+$('sessionNext').addEventListener('click',()=>{state.sessionPage++;load();});
+$('sessionBack').addEventListener('click',()=>{showSessionList();});
 $('clearTerm').addEventListener('click',()=>{state.term='';state.page=1;load();});
 $('excludeAdd').addEventListener('click',addExcluded);
 $('excludeInput').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();addExcluded();}});

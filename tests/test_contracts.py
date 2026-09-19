@@ -42,7 +42,7 @@ class Contracts(unittest.TestCase):
     def write(self, relative, rows, home=None):
         path = (home or self.home) / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text('\n'.join(json.dumps(dict(timestamp=TS, **row)) for row in rows) + '\n')
+        path.write_text('\n'.join(json.dumps({**dict(timestamp=TS), **row}) for row in rows) + '\n')
         return path
 
     def write_zstd(self, relative, rows, home=None):
@@ -624,6 +624,68 @@ class Contracts(unittest.TestCase):
         self.assertIn('dshword',terms)
         for excluded in ('pluginword','summaryword','legacyword'):
             self.assertNotIn(excluded,terms)
+
+    def test_sessions_list_groups_orders_pages_and_filters(self):
+        for name,stamps in (('a',('2026-09-18T08:00:00+08:00','2026-09-18T09:00:00+08:00')),('b',('2026-09-18T10:00:00+08:00',))):
+            self.write(f'.pi/agent/sessions/{name}.jsonl',[
+                dict(timestamp=stamps[0],type='message',id=name+'1',message=dict(role='user',content=name.upper()+'WORD')),
+            ]+([dict(timestamp=stamps[1],type='message',id=name+'2',message=dict(role='user',content=name.upper()+'TWO'))] if len(stamps)>1 else []))
+        db=self.home/'sessions.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        first=query(con,'/api/sessions',{})
+        self.assertEqual([(r['session'],r['turns']) for r in first['rows']],[('b',1),('a',2)])
+        self.assertEqual((first['total'],first['page'],first['pages']),(2,1,1))
+        self.assertEqual(first['rows'][0]['label'],'本机')
+        self.assertEqual(query(con,'/api/sessions',dict(agent='pi'))['total'],2)
+        self.assertEqual(query(con,'/api/sessions',dict(agent='codex'))['total'],0)
+        self.assertEqual(query(con,'/api/sessions',dict(page='2'))['rows'],[])
+        detail=query(con,'/api/session',dict(agent='pi',session='a'))
+        self.assertEqual([t['id'] for t in detail['turns']],['local:1','local:2'])
+        self.assertEqual([t['timestamp'] for t in detail['turns']],['2026-09-18T08:00:00+08:00','2026-09-18T09:00:00+08:00'])
+        self.assertEqual(detail['first'],'2026-09-18T08:00:00+08:00')
+        self.assertTrue(detail['source'].endswith('a.jsonl'))
+        with self.assertRaises(ValueError):
+            query(con,'/api/session',dict(agent='pi',session='missing'))
+        with self.assertRaises(ValueError):
+            query(con,'/api/session',dict(agent='',session='a'))
+
+    def test_session_detail_routes_remote_and_honors_search_flag(self):
+        local_home=self.home/'session-local'
+        local_home.mkdir()
+        self.remote_log(local_home,[dict(type='message',id='u',message=dict(role='user',content='LOCAL 会话'))])
+        local_index=self.home/'session-local.sqlite'
+        rebuild(local_index,local_home)
+        remote_home=self.home/'session-remote'
+        remote_home.mkdir()
+        self.remote_log(remote_home,[dict(type='message',id='u',message=dict(role='user',content='REMOTE 会话'))])
+        remote_index=self.home/'session-remote.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,_=self.remote_fetch(remote_index)
+        remote=dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'session-store'
+        directory.mkdir()
+        sync_remote(remote,directory,fetch)
+        config=self.home/'session-remotes.json'
+        save_remotes([remote],config)
+        con=connect(local_index)
+        self.addCleanup(con.close)
+        sources=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(sources))
+        listing=query(con,'/api/sessions',{},sources=sources)
+        self.assertEqual(len(listing['rows']),2)
+        self.assertEqual({r['label'] for r in listing['rows']},{'本机','desk.local:28763'})
+        remote_entry=next(r for r in listing['rows'] if r['key']!='local')
+        detail=query(con,'/api/session',dict(key=remote_entry['key'],agent=remote_entry['agent'],session=remote_entry['session']),sources=sources)
+        self.assertEqual(detail['turns'][0]['id'].split(':')[0],remote_entry['key'])
+        self.assertTrue(detail['source'].startswith('desk.local:28763 · '))
+        save_remotes([dict(remote,search=False,words=False)],config)
+        limited=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(limited))
+        self.assertEqual(len(query(con,'/api/sessions',{},sources=limited)['rows']),1)
+        with self.assertRaises(ValueError):
+            query(con,'/api/session',dict(key=remote_entry['key'],agent=remote_entry['agent'],session=remote_entry['session']),sources=limited)
 
     def test_sleep_until_slices_by_wall_clock_and_wakes_after_system_sleep(self):
         now=[0.0]

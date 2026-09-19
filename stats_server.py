@@ -724,6 +724,42 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 item['match'] = content[max(0, pos - 65):max(0, pos - 65) + 240]
             rows.append(item)
         return dict(rows=rows, total=total, page=page, pages=(total + 19) // 20)
+    if endpoint == '/api/sessions':
+        page = positive(p, 'page', 1, 1000000)
+        entries = []
+        for source in sources:
+            if not source.search:
+                continue
+            where, values = '', []
+            if p.get('agent'):
+                where, values = ' WHERE agent = ?', [p['agent']]
+            for row in source.con.execute(
+                    'SELECT agent,session,count(*) AS turns,min(timestamp) AS first,max(timestamp) AS last'
+                    ' FROM turns' + where + ' GROUP BY agent,session', values):
+                entries.append(dict(row, key=source.key, label=source.label))
+        entries.sort(key=lambda entry: (entry['key'], entry['agent'], entry['session']))
+        entries.sort(key=lambda entry: entry['first'] or '', reverse=True)
+        return dict(rows=entries[(page - 1) * 50:page * 50], total=len(entries), page=page,
+                    pages=(len(entries) + 49) // 50)
+    if endpoint == '/api/session':
+        key = p.get('key') or 'local'
+        agent, session = str(p.get('agent') or ''), str(p.get('session') or '')
+        if not agent or not session:
+            raise ValueError('agent 与 session 不能为空')
+        source = next((item for item in sources if item.key == key and item.search), None)
+        rows = source.con.execute(
+            'SELECT id,model,timestamp,substr(input,1,240) AS preview,source FROM turns'
+            ' WHERE agent=? AND session=? ORDER BY timestamp,id', (agent, session)).fetchall() if source else []
+        if not rows:
+            raise ValueError('会话不存在，请刷新会话列表')
+        turns = []
+        for row in rows:
+            item = dict(row)
+            item.pop('source')
+            item['id'] = f'{key}:{item["id"]}'
+            turns.append(item)
+        return dict(key=key, label=source.label, agent=agent, session=session, source=rows[0]['source'],
+                    first=rows[0]['timestamp'], last=rows[-1]['timestamp'], turns=turns)
     if endpoint == '/api/turn':
         key, _, number = str(p.get('id', '')).partition(':')
         if not number:
