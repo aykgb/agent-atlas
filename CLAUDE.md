@@ -30,6 +30,7 @@
 
 <important if="you are about to commit">
 - 先运行 README「验证」一节的两条命令（测试 + node --check），全部通过。
+- 提交内容不含本地 agent session 数据（.stats/ 索引、words-exclude.txt、日志原文）；测试夹具只用合成内容。
 </important>
 
 <important if="you are adding dependencies or frontend resources">
