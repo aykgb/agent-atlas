@@ -662,6 +662,8 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
         order = p.get('order', 'desc') or 'desc'
         if order not in ('desc', 'asc'):
             raise ValueError('order 须为 desc 或 asc')
+        hide_digits = p.get('hide_digits') == '1'
+        hide_english = p.get('hide_english') == '1'
         merged = {}
         for source in sources:
             if not source.words:
@@ -681,6 +683,12 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 entry = merged.setdefault(row['term'], [0, 0])
                 entry[0] += row['count']
                 entry[1] += row['turns']
+        if hide_digits or hide_english:
+            for term in list(merged):
+                if hide_digits and re.search(r'\d', term):
+                    del merged[term]
+                elif hide_english and re.search(r'[a-zA-Z]', term):
+                    del merged[term]
         words = [dict(term=term, count=count, turns=turns) for term, (count, turns) in merged.items()]
         words.sort(key=lambda word: (word['count'] if order == 'asc' else -word['count'], word['term']))
         return dict(words=words[:limit], excluded=list(exclude))

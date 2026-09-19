@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const colors = ['#6484d8', '#71b3a2', '#b49acb', '#e2b274', '#de8999', '#87acc8', '#a5b677', '#9299ad'];
-const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: [], sessionPage: 1, session: null};
+const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: [], sessionPage: 1, session: null, hideAlnum: false};
 const number = n => Number(n || 0).toLocaleString('en-US');
 const compact = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : number(n);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -361,7 +361,7 @@ async function load() {
     if (tab==='usage') result=await api('/api/usage',{agent:$('agent').value,model:$('model').value,n:$('n').value,unit:$('unit').value});
     else if (tab==='search') result=await api('/api/search',{...filters(),q:$('q').value,page:state.page,term:state.term,minlen:$('minLen').value,maxlen:$('maxLen').value});
     else if (tab==='sessions') result=await api('/api/sessions',{agent:$('agent').value,page:state.sessionPage});
-    else result=await api('/api/words',{...filters(),limit:$('wordLimit').value,order:$('wordOrder').value});
+    else result=await api('/api/words',{...filters(),limit:$('wordLimit').value,order:$('wordOrder').value,...(state.hideAlnum?{hide_digits:'1',hide_english:'1'}:{})});
     if (request!==state.request) return;
     ({usage:renderUsage,search:renderSearch,sessions:renderSessions,words:renderWords}[tab])(result);
     notice(); setStatus();
@@ -386,6 +386,10 @@ function setTab(tab) {
 document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
 for(const id of ['agent','model','n','unit','start','end','wordLimit','minLen','maxLen']) $(id).addEventListener('change',()=>{state.page=1;state.sessionPage=1;load();});
 $('wordOrder').addEventListener('change',()=>{updateWordLimitLabels();load();});
+function syncHideToggles() {
+  $('hideAlnum').setAttribute('aria-pressed', String(state.hideAlnum));
+}
+$('hideAlnum').addEventListener('click',()=>{state.hideAlnum=!state.hideAlnum;syncHideToggles();load();});
 $('group').addEventListener('change',renderCharts);
 $('bars').addEventListener('dblclick',event=>{
   const rect=event.target.closest('rect');
@@ -403,7 +407,7 @@ $('excludeInput').addEventListener('keydown',event=>{if(event.key==='Enter'){eve
 $('allDates').addEventListener('click',()=>{$('start').value='';$('end').value='';state.page=1;load();});
 $('reset').addEventListener('click',()=>{
   for(const id of ['agent','model','start','end','q','minLen','maxLen']) $(id).value='';
-  $('n').value=14;$('unit').value='day';state.page=1;state.term='';load();
+  $('n').value=14;$('unit').value='day';state.page=1;state.term='';state.hideAlnum=false;syncHideToggles();load();
 });
 async function resync() {
   $('refresh').disabled=true; setStatus('重建索引…');

@@ -254,6 +254,29 @@ class Contracts(unittest.TestCase):
             query(con,'/api/words',dict(order='random'))
         self.assertIn('order 须为 desc 或 asc',str(ctx.exception))
 
+    def test_words_hide_digits_and_english(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='北京 北京 alpha debug3')),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        base={w['term'] for w in query(con,'/api/words',dict(limit='100'))['words']}
+        self.assertIn('北京',base)
+        self.assertIn('alpha',base)
+        self.assertIn('debug3',base)
+        digits={w['term'] for w in query(con,'/api/words',dict(limit='100',hide_digits='1'))['words']}
+        self.assertIn('北京',digits)
+        self.assertIn('alpha',digits)
+        self.assertNotIn('debug3',digits)
+        english={w['term'] for w in query(con,'/api/words',dict(limit='100',hide_english='1'))['words']}
+        self.assertIn('北京',english)
+        self.assertNotIn('alpha',english)
+        self.assertNotIn('debug3',english)
+        both={w['term'] for w in query(con,'/api/words',dict(limit='100',hide_digits='1',hide_english='1'))['words']}
+        self.assertEqual(both,{'北京'})
+
     def test_index_is_opened_read_only(self):
         missing=self.home/'index.sqlite'
         with self.assertRaises(sqlite3.Error):
