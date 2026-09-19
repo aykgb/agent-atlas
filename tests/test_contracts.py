@@ -1,9 +1,11 @@
+import http.client
 import json
 import os
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import date
 from pathlib import Path
@@ -12,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import stats_data
 from stats_data import Dataset, collect, usage_values
-from stats_server import (LOOPBACK, Handler, allowed_hosts, changed_files, clean_remotes, close_sources,
+from stats_server import (LOOPBACK, Handler, Server, allowed_hosts, changed_files, clean_remotes, close_sources,
                           connect, excluded_words, load_remotes, open_sources, period, query, rebuild,
                           remote_path, remote_status, remotes_payload, save_excluded, save_remotes,
                           sync_remote, update_index)
@@ -426,8 +428,8 @@ class Contracts(unittest.TestCase):
         calls.clear()
         second=sync_remote(remote,directory,fetch)
         self.assertEqual(second['turns'],2)
-        self.assertTrue(any('limit=50&cursor=1' in path for path in calls))
-        self.assertFalse(any('limit=50&cursor=0' in path for path in calls))
+        self.assertTrue(any('limit=500&cursor=1' in path for path in calls))
+        self.assertFalse(any('limit=500&cursor=0' in path for path in calls))
         (remote_home/'.pi/agent/sessions/a.jsonl').write_text(
             json.dumps(dict(timestamp=TS,type='message',id='x1',message=dict(role='user',content='REMOTE 丙')))+'\n')
         rebuild(remote_index,remote_home)
@@ -435,7 +437,7 @@ class Contracts(unittest.TestCase):
         third=sync_remote(remote,directory,fetch)
         self.assertIsNone(third['error'])
         self.assertEqual(third['turns'],1)
-        self.assertTrue(any('limit=50&cursor=0' in path for path in calls))
+        self.assertTrue(any('limit=500&cursor=0' in path for path in calls))
         store=connect(remote_path(remote,directory))
         self.addCleanup(store.close)
         self.assertEqual(query(store,'/api/search',dict(q='REMOTE 丙'))['total'],1)
@@ -541,6 +543,29 @@ class Contracts(unittest.TestCase):
         self.assertFalse(fake_handler('127.0.0.1:18763',client='192.168.1.9').is_local())
         self.assertFalse(fake_handler('127.0.0.1:18763',forwarded='203.0.113.5').is_local())
         self.assertTrue(fake_handler('127.0.0.1:18763',forwarded='127.0.0.1').is_local())
+
+    def test_static_assets_return_etag_and_304(self):
+        server=Server(('127.0.0.1',0),Handler)
+        server.directory=self.home
+        server.allowed_names=allowed_hosts()
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        client=http.client.HTTPConnection('127.0.0.1',server.server_address[1],timeout=5)
+        self.addCleanup(client.close)
+        client.request('GET','/app.js')
+        first=client.getresponse()
+        body=first.read()
+        etag=first.getheader('ETag')
+        self.assertEqual(first.status,200)
+        self.assertTrue(etag)
+        self.assertEqual(first.getheader('Cache-Control'),'no-cache')
+        self.assertTrue(body)
+        client.request('GET','/app.js',headers={'If-None-Match':etag})
+        second=client.getresponse()
+        self.assertEqual(second.status,304)
+        self.assertEqual(second.getheader('ETag'),etag)
+        self.assertEqual(second.read(),b'')
 
     def test_meta_reports_writable_for_local_clients_only(self):
         self.write('.pi/agent/sessions/a.jsonl',[

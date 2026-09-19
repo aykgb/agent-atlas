@@ -48,11 +48,15 @@ def stamp(value):
 def zstd_lines(path):
     if not ZSTD:
         raise OSError(f'{path.name}: 未找到 zstd 命令，无法读取 dsh 会话')
-    result = subprocess.run([ZSTD, '-dc', '--quiet', str(path)], capture_output=True,
-                            text=True, encoding='utf-8', errors='replace')
-    if result.returncode != 0:
+    process = subprocess.Popen([ZSTD, '-dc', '--quiet', str(path)], stdout=subprocess.PIPE,
+                               text=True, encoding='utf-8', errors='replace')
+    try:
+        yield from process.stdout
+    finally:
+        process.stdout.close()
+        process.wait()
+    if process.returncode != 0:
         raise ValueError(f'{path.name}: zstd 解压失败')
-    return result.stdout.splitlines()
 
 
 def read_jsonl(path, warnings):

@@ -60,6 +60,16 @@
 - `/api/meta` 的 `count(*)` 写入 meta（12ms/次），收益小，不做。
 - 追加写 offset 续读：解析成本远低于 FTS 写入，不做。
 
+## 实测（2026-09-19 完成）
+
+- #1：`/api/search?q=mcp` 端到端 859ms → 21ms（含远端）；2 字查询本机 264ms，与改造前逐项一致；计数并入取行（`COUNT(*) OVER ()`），合并只取排序所需列，当页 20 行再取 input/output 拼回 `match`。
+- #2：导出 500 轮 65ms；同步页 500，本机 1376 轮全量重拉 3 个 turns 请求，增量二次同步 103ms。
+- #3：`/`、`/app.js`、`/style.css`、`/favicon.ico` 按 mtime+size 生成 ETag，`If-None-Match` 命中返回 304（`Cache-Control: no-cache`）。
+- #4+#5：contentless FTS 不允许 `rebuild`（SQLite 报错），故 #4 改为 turns 全部插入后用一条 `INSERT INTO search(rowid,search_text) SELECT …` 批量填充。旧新交替各 3 次：13.99s → 13.43s（-0.56s，未达 -1s 目标）。拆分实测：SQL 批量填充 9.79s、Python 重建文本 + executemany 9.89s，瓶颈在 trigram 索引化本身；原目标的 1s 差额来自旧 schema 的官方 `rebuild` 命令，contentless 下不可用，收益随之缩小。
+- #5：turns 去掉 `search_text`，FTS 改 `content=''` + `contentless_delete=1`（schema v4，旧索引与远端库启动后自动重建/重拉）。本机索引 391.5MB → 297.6MB（-94MB），远端库 200.8MB → 150.8MB（-50MB，远端迁移分支补 VACUUM 以释放旧页）。不足 3 字的查询按 `input` 与输出原文（json_each 还原）拼接后字面扫描，`match` 片段同源拼接。
+- #6：dsh 解压改 `Popen.stdout` 迭代，去掉整文件 `capture_output`；解析结果不变。
+- 依赖：`contentless_delete` 需 SQLite ≥ 3.43，`pyproject.toml` 下限提到 3.12，运行时按 `sqlite_version_info` 复核并报明确错误。
+
 ## 已评估、不做
 
 - journal/synchronous pragma：13.8 → 13.5s，噪声级。

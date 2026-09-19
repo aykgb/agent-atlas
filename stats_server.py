@@ -21,7 +21,7 @@ from stats_data import FIELDS, TOOLS, Dataset, discover, read_agent
 ROOT = Path(__file__).resolve().parent
 EXCLUDE_FILE = ROOT / 'words-exclude.txt'
 REMOTES_FILE = ROOT / 'remotes.json'
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 AUTO_REFRESH_SECONDS = 30 * 60
 STOP = set('的 了 和 是 在 我 你 他 她 它 这 那 一个 一些 我们 你们 他们 可以 需要 使用 进行 以及 并且 如果 然后 这个 那个 不 有 就 都 也 到 与 为 对 中 将 请 把 被 要 吗 呢 啊 the a an and or is are to of in for on with this that it be as at by from you your i we'.split())
 LOOPBACK = frozenset({'127.0.0.1', 'localhost', '::1'})
@@ -30,11 +30,11 @@ DEFAULT_ALLOWED = ('100.64.216.70',)
 SCHEMA = """
 CREATE TABLE usage(day TEXT,agent TEXT,model TEXT,new INTEGER,cc INTEGER,cr INTEGER,out INTEGER,msgs INTEGER);
 CREATE INDEX usage_filter ON usage(day,agent,model);
-CREATE TABLE turns(id INTEGER PRIMARY KEY,agent TEXT,session TEXT,model TEXT,day TEXT,timestamp TEXT,input TEXT,output TEXT,source TEXT,search_text TEXT,file TEXT,identity TEXT,fingerprint TEXT);
+CREATE TABLE turns(id INTEGER PRIMARY KEY,agent TEXT,session TEXT,model TEXT,day TEXT,timestamp TEXT,input TEXT,output TEXT,source TEXT,file TEXT,identity TEXT,fingerprint TEXT);
 CREATE INDEX turn_filter ON turns(day,agent);
 CREATE INDEX turn_file ON turns(file);
 CREATE INDEX turn_identity ON turns(identity);
-CREATE VIRTUAL TABLE search USING fts5(search_text,content='turns',content_rowid='id',tokenize='trigram');
+CREATE VIRTUAL TABLE search USING fts5(search_text,content='',contentless_delete=1,tokenize='trigram');
 CREATE TABLE terms(term TEXT,turn_id INTEGER,count INTEGER,PRIMARY KEY(term,turn_id));
 CREATE INDEX terms_turn ON terms(turn_id);
 CREATE TABLE files(path TEXT PRIMARY KEY,agent TEXT,size INTEGER,warnings TEXT);
@@ -42,6 +42,8 @@ CREATE TABLE file_usage(path TEXT,agent TEXT,key TEXT,day TEXT,model TEXT,new IN
 CREATE INDEX file_usage_filter ON file_usage(day,agent,model);
 CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);
 """
+SEARCH_TEXT = ("input || char(10) || COALESCE((SELECT group_concat(json_extract(part.value,'$.text'),char(10))"
+               " FROM json_each(turns.output) AS part), '')")
 
 
 def allowed_hosts(bind='127.0.0.1', extra=()):
@@ -198,45 +200,60 @@ def turn_fingerprint(agent, session, timestamp, text, output_text):
     return hashlib.sha1(material.encode('utf-8', 'ignore')).hexdigest()[:16]
 
 
+def stored_text(text, output):
+    parts = json.loads(output)
+    if isinstance(parts, list):
+        parts = '\n'.join(part['text'] for part in parts)
+    return text + '\n' + parts
+
+
+def require_contentless():
+    if sqlite3.sqlite_version_info < (3, 43):
+        raise RuntimeError(f'需要 SQLite ≥ 3.43 的 contentless_delete，当前为 {sqlite3.sqlite_version}')
+
+
 def insert_turn(con, agent, session, model, timestamp, text, output, source,
                 terms=(), searchable=True, file=None, identity=None, fp=None):
     output_text = '\n'.join(part['text'] for part in output) if isinstance(output, list) else output
-    search_text = text + '\n' + output_text
     stored = json.dumps(output, ensure_ascii=False) if isinstance(output, list) else output
     if fp is None:
         fp = turn_fingerprint(agent, session, timestamp, text, output_text)
-    row = con.execute('INSERT INTO turns(agent,session,model,day,timestamp,input,output,source,search_text,file,identity,fingerprint)'
-                      ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
-                      (agent, session, model, timestamp[:10], timestamp, text, stored, source, search_text, file, identity, fp))
+    row = con.execute('INSERT INTO turns(agent,session,model,day,timestamp,input,output,source,file,identity,fingerprint)'
+                      ' VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                      (agent, session, model, timestamp[:10], timestamp, text, stored, source, file, identity, fp))
     if searchable:
-        con.execute('INSERT INTO search(rowid,search_text) VALUES(?,?)', (row.lastrowid, search_text))
+        con.execute('INSERT INTO search(rowid,search_text) VALUES(?,?)', (row.lastrowid, text + '\n' + output_text))
     if terms:
         con.executemany('INSERT INTO terms VALUES(?,?,?)', [(term, row.lastrowid, count) for term, count in terms])
     return row.lastrowid
 
 
 def delete_file_rows(con, path):
-    con.execute("INSERT INTO search(search,rowid,search_text) SELECT 'delete',id,search_text FROM turns WHERE file=?", (path,))
+    con.execute('DELETE FROM search WHERE rowid IN (SELECT id FROM turns WHERE file=?)', (path,))
     con.execute('DELETE FROM terms WHERE turn_id IN (SELECT id FROM turns WHERE file=?)', (path,))
     con.execute('DELETE FROM turns WHERE file=?', (path,))
     con.execute('DELETE FROM file_usage WHERE path=?', (path,))
     con.execute('DELETE FROM files WHERE path=?', (path,))
 
 
-def store_dataset(con, source_path, data):
+def index_search(con):
+    con.execute('INSERT INTO search(rowid,search_text) SELECT id,' + SEARCH_TEXT + ' FROM turns')
+
+
+def store_dataset(con, source_path, data, searchable=True):
     for t in data.turns:
         identity = identity_hash(t['agent'], t['session'], t['key'])
         if con.execute('SELECT 1 FROM turns WHERE identity=? LIMIT 1', (identity,)).fetchone():
             continue
         terms = list(Counter(tokenize(t['input'])).items()) if t.get('words', True) else []
         insert_turn(con, t['agent'], t['session'], t['model'], t['timestamp'], t['input'], t['output'],
-                    t['source'], terms, True, source_path, identity)
+                    t['source'], terms, searchable, source_path, identity)
     con.executemany('INSERT INTO file_usage VALUES(?,?,?,?,?,?,?,?,?,?)',
                     [(source_path, u['agent'], u['key'], u['day'], u['model'], u['new'], u['cc'], u['cr'], u['out'], u['msgs'])
                      for u in data.usage])
 
 
-def parse_into(con, agent, file):
+def parse_into(con, agent, file, searchable=True):
     try:
         size = file.stat().st_size
     except OSError:
@@ -249,7 +266,7 @@ def parse_into(con, agent, file):
         data, warnings = Dataset(), [f'{agent}/{file.name}: {error}']
     con.execute('INSERT OR REPLACE INTO files VALUES(?,?,?,?)',
                 (str(file), agent, size, json.dumps(warnings, ensure_ascii=False)))
-    store_dataset(con, str(file), data)
+    store_dataset(con, str(file), data, searchable)
 
 
 def refresh_usage(con):
@@ -278,6 +295,7 @@ def write_meta(con, indexed_at):
 def rebuild(path, home=None):
     import jieba
     jieba.setLogLevel(40)
+    require_contentless()
     started = int(datetime.now().timestamp() * 1000)
     temporary = path.with_suffix('.building')
     temporary.unlink(missing_ok=True)
@@ -287,7 +305,8 @@ def rebuild(path, home=None):
     try:
         con.executescript(SCHEMA)
         for agent, file in discover(home):
-            parse_into(con, agent, file)
+            parse_into(con, agent, file, searchable=False)
+        index_search(con)
         refresh_usage(con)
         write_meta(con, started)
         con.commit()
@@ -364,11 +383,13 @@ def sync_remote(remote, directory, fetch=fetch_remote):
     con.row_factory = sqlite3.Row
     try:
         if meta_value(con, 'version') != SCHEMA_VERSION:
+            require_contentless()
             con.executescript('DROP TABLE IF EXISTS usage; DROP TABLE IF EXISTS turns; DROP TABLE IF EXISTS search;'
                               ' DROP TABLE IF EXISTS terms; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS file_usage;'
                               ' DROP TABLE IF EXISTS meta;')
             con.executescript(SCHEMA)
             con.commit()
+            con.execute('VACUUM')
         con.isolation_level = None
         con.execute('BEGIN IMMEDIATE')
         try:
@@ -391,7 +412,7 @@ def sync_remote(remote, directory, fetch=fetch_remote):
                 con.execute('DELETE FROM terms')
                 cursor, cursor_fp = 0, None
             while True:
-                page = fetch(remote, f'/api/export?section=turns&limit=50&cursor={cursor}')
+                page = fetch(remote, f'/api/export?section=turns&limit=500&cursor={cursor}')
                 turns = page.get('turns') or []
                 if page.get('meta'):
                     updated = page['meta'].get('updated')
@@ -543,7 +564,9 @@ def search_clauses(p, terms):
         clauses.append('id IN (SELECT rowid FROM search WHERE search MATCH ?)')
         values.append(' AND '.join('"' + term.replace('"', '""') + '"' for term in long_terms))
     for term in terms:
-        clauses.append("search_text LIKE ? ESCAPE '\\'")
+        if len(term) >= 3:
+            continue
+        clauses.append('(' + SEARCH_TEXT + ") LIKE ? ESCAPE '\\'")
         values.append('%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%')
     if p.get('term'):
         clauses.append('id IN (SELECT turn_id FROM terms WHERE term=?)')
@@ -595,10 +618,16 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 (cursor, limit + 1))]
             more = len(rows) > limit
             rows = rows[:limit]
+            terms = defaultdict(list)
+            if rows:
+                marks = ','.join('?' * len(rows))
+                for row in con.execute(
+                        f'SELECT turn_id,term,count FROM terms WHERE turn_id IN ({marks}) ORDER BY term',
+                        [row['id'] for row in rows]):
+                    terms[row['turn_id']].append(dict(term=row['term'], count=row['count']))
             for row in rows:
                 row['output'] = json.loads(row['output'])
-                row['terms'] = [dict(r) for r in con.execute(
-                    'SELECT term,count FROM terms WHERE turn_id=? ORDER BY term', (row['id'],))]
+                row['terms'] = terms[row['id']]
             result = dict(turns=rows, cursor=rows[-1]['id'] if more else None)
             if not cursor:
                 result['meta'] = index_meta(con)
@@ -654,21 +683,35 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 continue
             clauses, values = search_clauses(p, terms)
             where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
-            total += source.con.execute('SELECT count(*) FROM turns' + where, values).fetchone()[0]
             rows = source.con.execute(
-                'SELECT id,agent,session,model,timestamp,substr(input,1,240) AS preview,search_text FROM turns'
+                'SELECT id,agent,session,model,timestamp,substr(input,1,240) AS preview,COUNT(*) OVER () AS total FROM turns'
                 + where + ' ORDER BY timestamp DESC,id DESC LIMIT ?', values + [page * 20]).fetchall()
+            if rows:
+                total += rows[0]['total']
             for row in rows:
                 item = dict(row)
-                content = item.pop('search_text')
-                if terms:
-                    pos = content.casefold().find(terms[0].casefold())
-                    item['match'] = content[max(0, pos - 65):max(0, pos - 65) + 240]
+                item.pop('total')
                 collected.append((item['timestamp'] or '', item['id'], source.key, item))
         collected.sort(key=lambda entry: (entry[0], entry[1], entry[2]), reverse=True)
+        picked = collected[(page - 1) * 20:page * 20]
+        by_key = defaultdict(list)
+        for _, _, key, item in picked:
+            by_key[key].append(item['id'])
+        details = {}
+        for source in sources:
+            ids = by_key.get(source.key)
+            if not ids:
+                continue
+            for row in source.con.execute(
+                    'SELECT id,input,output FROM turns WHERE id IN (' + ','.join('?' * len(ids)) + ')', ids):
+                details[source.key, row['id']] = stored_text(row['input'], row['output'])
         rows = []
-        for _, _, key, item in collected[(page - 1) * 20:page * 20]:
+        for _, _, key, item in picked:
+            content = details[key, item['id']]
             item['id'] = f'{key}:{item["id"]}'
+            if terms:
+                pos = content.casefold().find(terms[0].casefold())
+                item['match'] = content[max(0, pos - 65):max(0, pos - 65) + 240]
             rows.append(item)
         return dict(rows=rows, total=total, page=page, pages=(total + 19) // 20)
     if endpoint == '/api/turn':
@@ -698,17 +741,26 @@ class Server(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    def respond(self, code, body, mime='application/json; charset=utf-8'):
+    def respond(self, code, body, mime='application/json; charset=utf-8', cache=None, etag=None):
         if not isinstance(body, bytes):
             body = json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header('Content-Type', mime)
         self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Cache-Control', cache or 'no-store')
+        if etag:
+            self.send_header('ETag', etag)
         self.send_header('X-Content-Type-Options', 'nosniff')
         self.send_header('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
         self.end_headers()
         self.wfile.write(body)
+
+    def not_modified(self, etag):
+        self.send_response(304)
+        self.send_header('ETag', etag)
+        self.send_header('Cache-Control', 'no-cache')
+        self.send_header('X-Content-Type-Options', 'nosniff')
+        self.end_headers()
 
     def hostname(self):
         return urlsplit('//' + self.headers.get('Host', '')).hostname or ''
@@ -752,7 +804,12 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path not in assets:
                 return self.respond(404, {'error': '未找到页面'})
             name, mime = assets[parsed.path]
-            self.respond(200, (ROOT / 'static' / name).read_bytes(), mime + '; charset=utf-8')
+            path = ROOT / 'static' / name
+            stat = path.stat()
+            etag = f'"{stat.st_mtime_ns}-{stat.st_size}"'
+            if self.headers.get('If-None-Match') == etag:
+                return self.not_modified(etag)
+            self.respond(200, path.read_bytes(), mime + '; charset=utf-8', cache='no-cache', etag=etag)
         except ValueError as error:
             self.respond(400, {'error': str(error)})
         except sqlite3.Error as error:
