@@ -11,6 +11,9 @@
 - `static/` — 前端：index.html、app.js、style.css
 - `tests/test_contracts.py` — 契约测试
 - `README.md` — 用法、数据来源与口径（解析与聚合逻辑的规格）、验证
+- `STATUS.md` — 任务面板：任务与状态（任务完成时更新；说 “status” 时由 skill 读取）
+- `skills/status/SKILL.md` — 项目状态 skill：读 STATUS.md 并采集服务/索引/远端/git 实况
+- `docs/tasks/` — 任务文档：方案、实测与验收标准
 - `remotes.json` — 远端汇入配置（运行时生成，不入库）
 - `words-exclude.txt` — 词频排除词（运行时生成，不入库）
 - `.stats/` — 派生索引（本机 index*.sqlite、每台远端 remote-*.sqlite）与服务 PID/日志，可删，下次启动自动重建（远端需重新同步）
@@ -27,6 +30,11 @@
 | `.venv/bin/python stats-today.py [--week \| --days N]` | CLI 统计 |
 | `.venv/bin/python -m unittest discover -s tests -v` | 运行测试 |
 | `node --check static/app.js` | 前端语法检查 |
+</important>
+
+<important if="you are adding a feature or changing behavior">
+- 先写任务文档到 `docs/tasks/`，并在 `STATUS.md` 表格登记（状态留空），再写代码；完成后把该行状态改为 ✅。
+- Bug 修复与任务文档范围内的重构直接做，不新建任务文档。
 </important>
 
 <important if="you are modifying log parsing, dedup, or aggregation logic">

@@ -3,3 +3,9 @@ __pycache__/
 .stats/
 words-exclude.txt
 remotes.json
+.opencode/
+.claude/
+.pi
+.codex
+.dsh
+.vscode
