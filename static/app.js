@@ -49,16 +49,19 @@ function highlight(text) {
 }
 function renderRemotes() {
   const list = state.remotes || [];
+  const off = list.filter(r => !r.enabled).length;
   $('remotes').hidden = !state.writable;
-  $('remoteSummary').textContent = list.length ? '（' + list.length + ' 台）' : '（未配置）';
+  $('remoteSummary').textContent = list.length ? '（' + list.length + ' 台' + (off ? ' · 停用 ' + off : '') + '）' : '（未配置）';
   $('remoteList').innerHTML = list.map((r, index) => {
     const tags = [r.usage && '用量', r.search && '会话', r.words && '词频'].filter(Boolean).map(esc).join(' · ');
-    const status = r.status ? (r.status.error
+    const status = !r.enabled ? '<span class="subtle">已停用</span>' : r.status ? (r.status.error
       ? '<span class="remote-bad" title="' + esc(r.status.error) + '">同步失败</span>'
       : '<span class="remote-good">' + number(r.status.turns) + ' 轮已同步</span>')
       : '<span class="subtle">未同步</span>';
-    return '<div class="remote-row"><b>' + esc(r.host) + ':' + r.port + '</b><span class="subtle">' + tags + '</span>' + status + '<button class="text-button" data-index="' + index + '">移除</button></div>';
+    return '<div class="remote-row"><label class="remote-switch"><input type="checkbox" data-toggle="' + index + '"' + (r.enabled ? ' checked' : '') + '> 启用</label><b>' + esc(r.host) + ':' + r.port + '</b><span class="subtle">' + tags + '</span>' + status + '<button class="text-button" data-index="' + index + '">移除</button></div>';
   }).join('');
+  $('remoteList').querySelectorAll('input[data-toggle]').forEach(box => box.addEventListener('change', () =>
+    saveRemotes(state.remotes.map((r, index) => index === +box.dataset.toggle ? {...r, enabled: box.checked} : r))));
   $('remoteList').querySelectorAll('button[data-index]').forEach(button => button.addEventListener('click', () =>
     saveRemotes(state.remotes.filter((_, index) => index !== +button.dataset.index))));
 }
@@ -280,7 +283,7 @@ $('remoteForm').addEventListener('submit',event=>{
   const host=$('remoteHost').value.trim(), port=Number($('remotePort').value);
   if (!host || !Number.isInteger(port) || port<1 || port>65535) return notice('填写有效的主机与端口',true);
   $('remoteHost').value='';
-  saveRemotes([...(state.remotes||[]).filter(r=>r.host!==host||r.port!==port),{host,port,usage:$('remoteUsage').checked,search:$('remoteSearch').checked,words:$('remoteWords').checked}]);
+  saveRemotes([...(state.remotes||[]).filter(r=>r.host!==host||r.port!==port),{host,port,enabled:true,usage:$('remoteUsage').checked,search:$('remoteSearch').checked,words:$('remoteWords').checked}]);
 });
 $('remoteWords').addEventListener('change',()=>{if($('remoteWords').checked)$('remoteSearch').checked=true;});
 $('remoteSearch').addEventListener('change',()=>{if(!$('remoteSearch').checked)$('remoteWords').checked=false;});

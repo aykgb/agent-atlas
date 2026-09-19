@@ -49,6 +49,7 @@
 - 汇入由本地服务主动 GET 远端 `/api/export` 并写入本地索引；远端不可达时重建必须继续，只在 warnings 与 meta.remotes 标记失败。
 - `remotes.json` 是本地个人配置（gitignore）；POST /api/remotes 与其它写操作一样仅限本机。
 - 勾选 words 隐含 search：词频轮次必须可搜索、可打开。
+- 每台远端有 enabled 开关，停用只保留配置不汇入；状态记录在 meta.remotes（仅启用中的远端）。
 </important>
 
 <important if="you are reading or writing agent logs or the index">

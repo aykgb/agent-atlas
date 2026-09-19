@@ -61,7 +61,7 @@ def clean_remotes(entries, strict=False):
         seen.add((host, port))
         sections = {key: bool(entry.get(key, True)) for key in ('usage', 'search', 'words')}
         sections['search'] = sections['search'] or sections['words']
-        remotes.append({'host': host, 'port': port, **sections})
+        remotes.append({'host': host, 'port': port, 'enabled': bool(entry.get('enabled', True)), **sections})
     return remotes
 
 
@@ -214,7 +214,8 @@ def rebuild(path, home=None, remotes=(), fetch=fetch_remote):
             terms = list(Counter(tokenize(t['input'])).items()) if t.get('words', True) else []
             insert_turn(con, t['agent'], t['session'], t['model'], t['timestamp'], t['input'], t['output'], t['source'], terms)
         warnings = list(data.warnings)
-        statuses = [import_remote(con, remote, grouped, warnings, fetch) for remote in remotes]
+        statuses = [import_remote(con, remote, grouped, warnings, fetch)
+                    for remote in remotes if remote.get('enabled', True)]
         con.executemany('INSERT INTO usage VALUES(?,?,?,?,?,?,?,?)', [(*key, *values) for key, values in grouped.items()])
         meta = dict(updated=datetime.now().astimezone().isoformat(), warnings=warnings,
                     sources=dict(data.sources), agents=TOOLS, remotes=statuses)

@@ -300,9 +300,11 @@ class Contracts(unittest.TestCase):
             dict(host='',port=1),
             dict(host='ok.local',port=70000),
             'junk',
-        ]),[dict(host='desk.local',port=28763,usage=True,search=True,words=True)])
+        ]),[dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)])
+        self.assertEqual(clean_remotes([dict(host='off.local',port=9,enabled=False)]),
+                         [dict(host='off.local',port=9,enabled=False,usage=True,search=True,words=True)])
         saved=save_remotes([dict(host=' Desk.local ',port='28763',usage=True,search=False,words=True)],path)
-        self.assertEqual(saved,[dict(host='desk.local',port=28763,usage=True,search=True,words=True)])
+        self.assertEqual(saved,[dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)])
         self.assertEqual(load_remotes(path),saved)
         with self.assertRaises(ValueError):
             save_remotes([dict(host='x.local',port=0)],path)
@@ -382,6 +384,41 @@ class Contracts(unittest.TestCase):
         self.assertEqual(query(con,'/api/search',dict(q='ONLYUSAGEWORD'))['total'],0)
         self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'))['rows']),6)
         self.assertEqual(query(con,'/api/meta',{})['remotes'][0]['turns'],0)
+
+    def test_disabled_remote_is_kept_in_config_but_not_merged(self):
+        remote_home=self.home/'toggle-remote'
+        remote_home.mkdir()
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='TOGGLEWORD')),
+            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=4,output=2))),
+        ],home=remote_home)
+        remote_db=self.home/'toggle-remote.sqlite'
+        rebuild(remote_db,remote_home)
+        remote_con=connect(remote_db)
+        self.addCleanup(remote_con.close)
+        def fetch(remote,path):
+            parsed=urlsplit(path)
+            return query(remote_con,parsed.path,{k:v[-1] for k,v in parse_qs(parsed.query).items()})
+        local_home=self.home/'toggle-local'
+        local_home.mkdir()
+        self.write('.pi/agent/sessions/b.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='LOCALTOGGLE')),
+        ],home=local_home)
+        off=dict(host='toggle.local',port=9,usage=True,search=True,words=True,enabled=False)
+        disabled_db=self.home/'toggle-off.sqlite'
+        rebuild(disabled_db,local_home,[off],fetch)
+        con=connect(disabled_db)
+        self.addCleanup(con.close)
+        self.assertEqual(query(con,'/api/meta',{})['turns'],1)
+        self.assertEqual(query(con,'/api/meta',{})['remotes'],[])
+        self.assertEqual(query(con,'/api/search',dict(q='TOGGLEWORD'))['total'],0)
+        enabled_db=self.home/'toggle-on.sqlite'
+        rebuild(enabled_db,local_home,[dict(off,enabled=True)],fetch)
+        con=connect(enabled_db)
+        self.addCleanup(con.close)
+        self.assertEqual(query(con,'/api/meta',{})['turns'],2)
+        self.assertEqual(query(con,'/api/search',dict(q='TOGGLEWORD'))['total'],1)
+        self.assertIsNone(query(con,'/api/meta',{})['remotes'][0]['error'])
 
     def test_remote_import_failure_keeps_local_data_and_warns(self):
         self.write('.pi/agent/sessions/a.jsonl',[
