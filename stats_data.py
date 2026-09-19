@@ -1,0 +1,293 @@
+"""Read local agent logs into usage events and searchable conversation turns."""
+import json
+import sqlite3
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok')
+FIELDS = ('new', 'cc', 'cr', 'out', 'msgs')
+
+
+def stamp(value):
+    try:
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(value / 1000 if value > 1e11 else value).astimezone().isoformat()
+        return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone().isoformat()
+    except (ValueError, TypeError, AttributeError, OSError):
+        return ''
+
+
+def read_jsonl(path, warnings):
+    with path.open(encoding='utf-8', errors='replace') as stream:
+        for number, line in enumerate(stream, 1):
+            try:
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    yield value
+            except ValueError:
+                warnings.append(f'{path.name}:{number} 无法解析，已跳过')
+
+
+def text_of(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return '\n'.join(filter(None, (text_of(v) for v in value)))
+    if isinstance(value, dict):
+        for key in ('text', 'content', 'thinking'):
+            if key in value:
+                return text_of(value[key])
+        if value.get('type') in ('image', 'input_image', 'image_url'):
+            return '[图片]'
+    return ''
+
+
+def blocks(content, role='assistant', channel=None):
+    if isinstance(content, str):
+        return [{'kind': '工具结果' if role in ('tool', 'toolResult') else '正文', 'text': content}] if content else []
+    result = []
+    for part in content or []:
+        if not isinstance(part, dict):
+            continue
+        typ = part.get('type', '')
+        if role in ('tool', 'toolResult') or typ == 'tool_result':
+            kind, value = '工具结果', text_of(part.get('content', part))
+        elif typ in ('tool_use', 'toolCall', 'tool'):
+            kind = '工具调用'
+            value = part.get('name', part.get('tool', '')) + '\n' + json.dumps(part.get('input', part.get('arguments', part.get('state', {}))), ensure_ascii=False, indent=2)
+        elif typ in ('thinking', 'reasoning'):
+            kind, value = '思考', text_of(part)
+        else:
+            kind, value = ('过程' if channel == 'commentary' else '正文'), text_of(part)
+        if value:
+            result.append({'kind': kind, 'text': value})
+    return result
+
+
+def usage_values(agent, u):
+    if agent == 'claude':
+        return [u.get(k, 0) or 0 for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens')] + [1]
+    if agent == 'pi':
+        return [u.get('input', 0), u.get('cacheWrite', 0), u.get('cacheRead', 0), u.get('output', 0) + u.get('reasoning', 0), 1]
+    if agent == 'opencode':
+        cache = u.get('cache') or {}
+        return [u.get('input', 0), cache.get('write', 0), cache.get('read', 0), u.get('output', 0) + u.get('reasoning', 0), 1]
+    if agent == 'grok':
+        cr, cc = u.get('cachedReadTokens', 0), u.get('cacheCreationTokens', 0)
+        return [max(u.get('inputTokens', 0) - cr - cc, 0), cc, cr, u.get('outputTokens', 0), u.get('modelCalls', 1)]
+    cr, cc = u.get('cached_input_tokens', 0), u.get('cache_write_input_tokens', 0)
+    # Codex output_tokens includes reasoning; total_tokens confirms that boundary.
+    return [max(u.get('input_tokens', 0) - cr - cc, 0), cc, cr, u.get('output_tokens', 0), 1]
+
+
+class Dataset:
+    def __init__(self):
+        self.usage, self.turns, self.warnings = [], [], []
+        self.seen = {}
+        self.sources = defaultdict(int)
+
+    def add_usage(self, agent, session, model, ts, usage, key):
+        identity = (agent, key)
+        if not usage:
+            return
+        if identity in self.seen:
+            existing = self.seen[identity]
+            for key, value in zip(FIELDS, usage_values(agent, usage)):
+                existing[key] = max(existing[key], value)
+            return
+        ts = stamp(ts)
+        if not ts:
+            self.warnings.append(f'{agent}/{session} 用量缺少有效时间，已跳过')
+            return
+        values = usage_values(agent, usage)
+        event = dict(agent=agent, session=session, model=model or 'unknown', day=ts[:10], **dict(zip(FIELDS, values)))
+        self.usage.append(event)
+        self.seen[identity] = event
+
+    def read_file(self, agent, path):
+        records = list(read_jsonl(path, self.warnings))
+        self.sources[agent] += 1
+        session = path.parent.name if agent == 'grok' else path.stem
+        current = None
+        model = 'unknown'
+        previous_total = None
+        seen_messages = set()
+        precise_turns = {(d.get('payload') or {}).get('turn_id') for d in records if d.get('type') == 'token_usage_record'}
+        turn_id = None
+        has_response_user = any(d.get('type') == 'response_item' and (d.get('payload') or {}).get('role') == 'user' for d in records)
+
+        def user(value, ts, identity, append=False):
+            nonlocal current
+            if not value:
+                return
+            if append and current:
+                current['input'] += value
+                return
+            current = dict(agent=agent, session=session, model=model, timestamp=stamp(ts), input=value, output=[], source=str(path), key=str(identity))
+            self.turns.append(current)
+
+        def output(parts, join=False):
+            if current:
+                for part in parts:
+                    if join and current['output'] and current['output'][-1]['kind'] == part['kind']:
+                        current['output'][-1]['text'] += part['text']
+                    else:
+                        current['output'].append(part)
+                if model != 'unknown':
+                    models = set(current['model'].split(' · ')) - {'unknown'}
+                    models.add(model)
+                    current['model'] = ' · '.join(sorted(models))
+
+        prompt_index = None
+        for index, d in enumerate(records):
+            typ, ts = d.get('type'), d.get('timestamp')
+            if agent in ('claude', 'pi'):
+                m = d.get('message') or {}
+                if typ == 'model_change':
+                    model = d.get('modelId') or model
+                if m.get('model'):
+                    model = m['model']
+                if not m:
+                    continue
+                identity = d.get('uuid') or d.get('id') or index
+                if identity in seen_messages:
+                    continue
+                seen_messages.add(identity)
+                role, content = m.get('role'), m.get('content')
+                if role == 'user':
+                    if isinstance(content, list):
+                        tool_parts = [p for p in content if p.get('type') == 'tool_result']
+                        output(blocks(tool_parts))
+                        content = [p for p in content if p.get('type') != 'tool_result']
+                    if not d.get('isMeta'):
+                        user(text_of(content), ts, identity)
+                elif role in ('assistant', 'toolResult'):
+                    output(blocks(content, role))
+                if role == 'assistant' and m.get('usage'):
+                    # Pi IDs are short and scoped to the session lineage.
+                    key = m.get('id') if agent == 'claude' else (identity, ts, model)
+                    self.add_usage(agent, session, model, ts, m['usage'], key or (str(path), index))
+            elif agent == 'codex':
+                p = d.get('payload') or {}
+                if typ == 'session_meta':
+                    session = p.get('id') or session
+                if typ == 'turn_context':
+                    model = p.get('model') or model
+                    turn_id = p.get('turn_id')
+                if typ == 'world_state':
+                    model = (p.get('state') or {}).get('model') or model
+                if typ == 'token_usage_record':
+                    self.add_usage(agent, session, model, ts, p.get('usage'), p.get('response_id') or (session, d.get('ordinal', index)))
+                if typ == 'event_msg' and p.get('type') == 'token_count' and turn_id not in precise_turns:
+                    info = p.get('info') or {}
+                    total = info.get('total_token_usage')
+                    if total and total == previous_total:
+                        continue
+                    previous_total = total
+                    self.add_usage(agent, session, model, ts, info.get('last_token_usage'), (session, d.get('ordinal', index)))
+                if typ == 'event_msg' and p.get('type') == 'user_message' and not has_response_user:
+                    user(p.get('message', ''), ts, index)
+                if typ != 'response_item':
+                    continue
+                identity = p.get('id') or d.get('ordinal', index)
+                if identity in seen_messages:
+                    continue
+                seen_messages.add(identity)
+                pt = p.get('type', '')
+                if pt == 'message' and p.get('role') == 'user':
+                    content = p.get('content') or []
+                    kinds = (p.get('internal_chat_message_metadata_passthrough') or {}).get('content_item_kinds')
+                    if kinds and len(kinds) == len(content):
+                        content = [item for item, kind in zip(content, kinds) if kind.startswith('user.')]
+                    user(text_of(content), ts, identity)
+                elif pt == 'message' and p.get('role') == 'assistant':
+                    output(blocks(p.get('content'), channel=p.get('channel')))
+                elif pt == 'reasoning':
+                    output([{'kind': '思考', 'text': text_of(p.get('summary'))}] if text_of(p.get('summary')) else [])
+                elif pt.endswith('_call_output'):
+                    output([{'kind': '工具结果', 'text': text_of(p.get('output')) or json.dumps(p.get('output'), ensure_ascii=False)}])
+                elif pt.endswith('_call'):
+                    output([{'kind': '工具调用', 'text': p.get('name', pt) + '\n' + text_of(p.get('arguments', p.get('input', '')))}])
+            elif agent == 'grok':
+                p = d.get('params') or {}
+                u, meta = p.get('update') or {}, p.get('_meta') or {}
+                kind = u.get('sessionUpdate')
+                session = p.get('sessionId') or session
+                model = (u.get('_meta') or {}).get('modelId') or model
+                ts = meta.get('agentTimestampMs') or ts
+                identity = meta.get('eventId') or index
+                if identity in seen_messages:
+                    continue
+                seen_messages.add(identity)
+                if kind == 'user_message_chunk':
+                    pi = (u.get('_meta') or {}).get('promptIndex')
+                    user(text_of(u.get('content')), ts, identity, pi is not None and pi == prompt_index)
+                    prompt_index = pi
+                elif kind in ('agent_thought_chunk', 'agent_message_chunk'):
+                    output([{'kind': '思考' if kind == 'agent_thought_chunk' else '正文', 'text': text_of(u.get('content'))}], join=True)
+                elif kind == 'tool_call':
+                    output([{'kind': '工具调用', 'text': u.get('title', '') + '\n' + json.dumps(u.get('rawInput'), ensure_ascii=False, indent=2)}])
+                elif kind == 'tool_call_update' and ('rawOutput' in u or u.get('content')):
+                    output([{'kind': '工具结果', 'text': text_of(u.get('content')) or json.dumps(u.get('rawOutput'), ensure_ascii=False, indent=2)}])
+                elif kind == 'turn_completed':
+                    usage = u.get('usage') or {}
+                    for name, values in (usage.get('modelUsage') or {model: usage}).items():
+                        self.add_usage(agent, session, name, ts, values, (identity, name))
+                    prompt_index = None
+
+    def read_opencode(self, path):
+        self.sources['opencode'] += 1
+        con = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
+        try:
+            parts = defaultdict(list)
+            for mid, raw in con.execute('select message_id,data from part order by time_created,id'):
+                parts[mid].append(json.loads(raw))
+            current = {}
+            for mid, sid, ts, raw in con.execute('select id,session_id,time_created,data from message order by time_created,id'):
+                m = json.loads(raw)
+                role = m.get('role')
+                model = m.get('modelID') or (m.get('model') or {}).get('modelID') or 'unknown'
+                if role == 'user':
+                    value = text_of([p for p in parts[mid] if not p.get('synthetic')])
+                    if value:
+                        turn = dict(agent='opencode', session=sid, model=model, timestamp=stamp(ts), input=value, output=[], source=str(path), key=mid)
+                        self.turns.append(turn)
+                        current[(sid, mid)] = turn
+                        current[sid] = turn
+                elif role == 'assistant':
+                    turn = current.get((sid, m.get('parentID'))) or current.get(sid)
+                    if turn:
+                        turn['output'].extend(blocks(parts[mid]))
+                        for p in parts[mid]:
+                            if p.get('type') == 'tool' and (p.get('state') or {}).get('output'):
+                                turn['output'].append({'kind': '工具结果', 'text': text_of(p['state']['output'])})
+                        models = set(turn['model'].split(' · ')) - {'unknown'}
+                        models.add(model)
+                        turn['model'] = ' · '.join(sorted(models))
+                    self.add_usage('opencode', sid, model, ts, m.get('tokens'), mid)
+        finally:
+            con.close()
+
+
+def collect(home=None):
+    home = Path(home or Path.home()).resolve()
+    data = Dataset()
+    patterns = {'claude': '.claude/projects/**/*.jsonl', 'codex': '.codex/sessions/**/*.jsonl',
+                'pi': '.pi/agent/sessions/**/*.jsonl', 'grok': '.grok/sessions/**/updates.jsonl'}
+    for agent, pattern in patterns.items():
+        paths = set(home.glob(pattern))
+        if agent == 'codex':
+            paths.update(home.glob('.codex/archived_sessions/**/*.jsonl'))
+        for path in sorted(paths):
+            try:
+                data.read_file(agent, path)
+            except (OSError, ValueError, TypeError) as error:
+                data.warnings.append(f'{agent}/{path.name}: {error}')
+    db = home / '.local/share/opencode/opencode.db'
+    if db.exists():
+        try:
+            data.read_opencode(db)
+        except (sqlite3.Error, ValueError, OSError) as error:
+            data.warnings.append(f'opencode: {error}')
+    return data
