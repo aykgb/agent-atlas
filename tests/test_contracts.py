@@ -123,7 +123,7 @@ class Contracts(unittest.TestCase):
             dict(type='user',uuid='c',isCompactSummary=True,message=dict(role='user',content='COMPACTWORD')),
             dict(type='user',uuid='s',isSidechain=True,message=dict(role='user',content='SIDEWORD')),
             dict(type='user',uuid='o',message=dict(role='user',content='<local-command-stdout>STDOUTWORD</local-command-stdout>')),
-            dict(type='user',uuid='w',message=dict(role='user',content='<!-- wt_5: /Users/clark/.worktrees/wt_5 -->\n\nHUMANWORD2')),
+            dict(type='user',uuid='w',message=dict(role='user',content='<!-- wt_5: $HOME/.worktrees/wt_5 -->\n\nHUMANWORD2')),
         ])
         self.write('.codex/sessions/c.jsonl',[
             dict(type='response_item',payload=dict(id='e',type='message',role='user',content=[dict(type='input_text',text='<environment_context>ENVWORD</environment_context>')])),
@@ -141,7 +141,7 @@ class Contracts(unittest.TestCase):
             ('u2','s',20,json.dumps(dict(role='user'))),
         ])
         con.executemany('INSERT INTO part VALUES(?,?,?,?)',[
-            ('p1','u1',10,json.dumps(dict(type='text',text='<!-- main: /Users/clark/xidi-minimal -->\n\nHUMANWORD3'))),
+            ('p1','u1',10,json.dumps(dict(type='text',text='<!-- main: $HOME/demo -->\n\nHUMANWORD3'))),
             ('p2','u2',20,json.dumps(dict(type='text',text='[idle-notify:busy->idle] NOTIFYWORD'))),
         ])
         con.commit();con.close()
@@ -159,7 +159,7 @@ class Contracts(unittest.TestCase):
         self.assertIn('humanword',terms)
         self.assertIn('humanword2',terms)
         self.assertIn('humanword3',terms)
-        for excluded in ('compactword','sideword','reviewword','stdoutword','envword','environment','rulestext','skilltext','worktrees','xidi','notifyword'):
+        for excluded in ('compactword','sideword','reviewword','stdoutword','envword','environment','rulestext','skilltext','worktrees','demo','notifyword'):
             self.assertNotIn(excluded,terms)
         for found in ('REVIEWWORD','COMPACTWORD','SIDEWORD','STDOUTWORD','ENVWORD','RULESTEXT','SKILLTEXT','HUMANWORD2','HUMANWORD3','NOTIFYWORD'):
             self.assertEqual(query(con,'/api/search',dict(q=found))['total'],1)

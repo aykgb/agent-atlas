@@ -7,7 +7,7 @@
 需要 uv（Python 3.10 或更新版本，缺失时由 uv 自动安装）；SQLite 需支持 FTS5 全文搜索扩展及 trigram 分词器。
 
 ```sh
-cd /Users/clark/stats
+cd $HOME/stats
 uv sync
 .venv/bin/python stats_server.py
 ```
