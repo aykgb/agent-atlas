@@ -12,8 +12,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import stats_data
 from stats_data import Dataset, collect, usage_values
-from stats_server import (LOOPBACK, Handler, allowed_hosts, clean_remotes, close_sources, connect,
-                          excluded_words, load_remotes, open_sources, period, query, rebuild,
+from stats_server import (LOOPBACK, Handler, allowed_hosts, changed_files, clean_remotes, close_sources,
+                          connect, excluded_words, load_remotes, open_sources, period, query, rebuild,
                           remote_path, remote_status, remotes_payload, save_excluded, save_remotes,
                           sync_remote, update_index)
 
@@ -599,6 +599,24 @@ class Contracts(unittest.TestCase):
         self.assertIn('dshword',terms)
         for excluded in ('pluginword','summaryword','legacyword'):
             self.assertNotIn(excluded,terms)
+
+    def test_auto_refresh_gate_sees_only_new_activity(self):
+        file_a=self.remote_log(self.home,[
+            dict(type='message',id='u1',message=dict(role='user',content='闸门甲')),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual(changed_files(con,self.home),[])
+        with file_a.open('a',encoding='utf-8') as handle:
+            handle.write(json.dumps(dict(timestamp=TS,type='message',id='u2',message=dict(role='user',content='闸门乙')))+'\n')
+        self.assertEqual([Path(path).resolve() for path,_ in changed_files(con,self.home)],[file_a.resolve()])
+        update_index(db,self.home)
+        self.assertEqual(changed_files(con,self.home),[])
+        file_a.unlink()
+        self.assertEqual([(Path(path).resolve(),agent) for path,agent in changed_files(con,self.home)],
+                         [(file_a.resolve(),None)])
 
     def test_dsh_without_zstd_command_warns_and_skips(self):
         path=self.home/'.dsh/sessions/--proj--/session-x/session.v3.jsonl.zstd'

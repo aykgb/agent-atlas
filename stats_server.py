@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import urllib.request
 from collections import Counter, defaultdict
 from contextlib import closing
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parent
 EXCLUDE_FILE = ROOT / 'words-exclude.txt'
 REMOTES_FILE = ROOT / 'remotes.json'
 SCHEMA_VERSION = 3
+AUTO_REFRESH_SECONDS = 30 * 60
 STOP = set('的 了 和 是 在 我 你 他 她 它 这 那 一个 一些 我们 你们 他们 可以 需要 使用 进行 以及 并且 如果 然后 这个 那个 不 有 就 都 也 到 与 为 对 中 将 请 把 被 要 吗 呢 啊 the a an and or is are to of in for on with this that it be as at by from you your i we'.split())
 LOOPBACK = frozenset({'127.0.0.1', 'localhost', '::1'})
 DEFAULT_ALLOWED = ('100.64.216.70',)
@@ -297,6 +299,24 @@ def rebuild(path, home=None):
     os.replace(temporary, path)
 
 
+def changed_files(con, home=None):
+    """对比索引记录，返回需要重解析的文件（agent 为 None 表示已消失）。"""
+    indexed_at = int(meta_value(con, 'indexed_at') or 0)
+    known = {row['path']: row['size'] for row in con.execute('SELECT path,size FROM files')}
+    found = {str(file): agent for agent, file in discover(home)}
+    changed = []
+    for raw, agent in found.items():
+        try:
+            stat = Path(raw).stat()
+        except OSError:
+            continue
+        if raw in known and int(stat.st_mtime * 1000) <= indexed_at and stat.st_size == known[raw]:
+            continue
+        changed.append((raw, agent))
+    changed.extend((raw, None) for raw in set(known) - set(found))
+    return changed
+
+
 def update_index(path, home=None):
     if index_version(path) != SCHEMA_VERSION:
         return rebuild(path, home)
@@ -305,24 +325,11 @@ def update_index(path, home=None):
     con.row_factory = sqlite3.Row
     changed = 0
     try:
-        indexed_at = int(meta_value(con, 'indexed_at') or 0)
-        known = {row['path']: row['size'] for row in con.execute('SELECT path,size FROM files')}
-        found = {str(file): agent for agent, file in discover(home)}
-        for raw, agent in found.items():
-            try:
-                stat = Path(raw).stat()
-                mtime = int(stat.st_mtime * 1000)
-            except OSError:
-                continue
-            if raw in known and mtime <= indexed_at and stat.st_size == known[raw]:
-                continue
+        for raw, agent in changed_files(con, home):
             with con:
                 delete_file_rows(con, raw)
-                parse_into(con, agent, Path(raw))
-            changed += 1
-        for raw in set(known) - set(found):
-            with con:
-                delete_file_rows(con, raw)
+                if agent is not None:
+                    parse_into(con, agent, Path(raw))
             changed += 1
         refresh_usage(con)
         write_meta(con, started)
@@ -330,6 +337,23 @@ def update_index(path, home=None):
         return changed
     finally:
         con.close()
+
+
+def watch_index(server, interval=AUTO_REFRESH_SECONDS):
+    while True:
+        time.sleep(interval)
+        if not server.refresh_lock.acquire(blocking=False):
+            continue
+        try:
+            with closing(connect(server.db)) as con:
+                pending = len(changed_files(con, server.home))
+            if pending:
+                count = update_index(server.db, server.home)
+                print(f'自动刷新：{count} 个 session 文件有变化，索引已更新', flush=True)
+        except Exception as error:
+            print(f'自动刷新失败：{error}', flush=True)
+        finally:
+            server.refresh_lock.release()
 
 
 def sync_remote(remote, directory, fetch=fetch_remote):
@@ -823,10 +847,12 @@ def main():
     server.db, server.home, server.directory = path, args.home, directory
     server.refresh_lock = threading.Lock()
     server.allowed_names = allowed_hosts(args.host, args.allow_host)
+    threading.Thread(target=watch_index, args=(server,), daemon=True).start()
     address = args.host if args.host not in ('0.0.0.0', '::') else '127.0.0.1'
     if ':' in address:
         address = '[' + address + ']'
     print(f'打开 http://{address}:{args.port} · Ctrl+C 停止', flush=True)
+    print(f'每 {AUTO_REFRESH_SECONDS // 60} 分钟自动检查会话更新', flush=True)
     print('远端放行 Host：' + '、'.join(sorted(server.allowed_names - LOOPBACK)), flush=True)
     try:
         server.serve_forever()

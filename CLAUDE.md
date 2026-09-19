@@ -59,6 +59,7 @@
 
 <important if="you are modifying the local index or refresh (rebuild, update_index)">
 - 刷新为增量：meta 的 `indexed_at`（毫秒水位）加 `files(path,size)` 判断，只重解析变化文件；首次运行、schema 升级与 `--reindex` 才全量重建。
+- 服务每 30 分钟自动检查（`changed_files` 作闸门、`watch_index` 线程），有变化才增量更新本机索引，不自动同步远端。
 - 用量按文件存 `file_usage`、查询前聚合；跨文件重复按 `(agent,key)` 取 MAX，保持旧口径。
 </important>
 
