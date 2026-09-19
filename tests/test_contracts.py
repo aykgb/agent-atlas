@@ -99,14 +99,15 @@ class Contracts(unittest.TestCase):
         db.parent.mkdir(parents=True)
         con=sqlite3.connect(db)
         con.executescript('CREATE TABLE message(id,session_id,time_created,data); CREATE TABLE part(id,message_id,time_created,data);')
+        # 时间戳用真实量级的 epoch 毫秒：1970 年的日期在 Python 3.14/Windows 上 astimezone() 会抛 OSError
         con.executemany('INSERT INTO message VALUES(?,?,?,?)',[
-            ('u','s',1000,json.dumps(dict(role='user',model=dict(modelID='x')))),
-            ('a','s',2000,json.dumps(dict(role='assistant',parentID='u',modelID='x',tokens=dict(input=10,output=4,reasoning=2,cache=dict(read=3,write=1))))),
+            ('u','s',1700000001000,json.dumps(dict(role='user',model=dict(modelID='x')))),
+            ('a','s',1700000002000,json.dumps(dict(role='assistant',parentID='u',modelID='x',tokens=dict(input=10,output=4,reasoning=2,cache=dict(read=3,write=1))))),
         ])
         con.executemany('INSERT INTO part VALUES(?,?,?,?)',[
-            ('p','u',1000,json.dumps(dict(type='text',text='测试'))),
-            ('q','a',2000,json.dumps(dict(type='text',text='回答'))),
-            ('r','a',3000,json.dumps(dict(type='tool',tool='bash',state=dict(status='completed',input=dict(command='ls'),output='文件列表')))),
+            ('p','u',1700000001000,json.dumps(dict(type='text',text='测试'))),
+            ('q','a',1700000002000,json.dumps(dict(type='text',text='回答'))),
+            ('r','a',1700000003000,json.dumps(dict(type='tool',tool='bash',state=dict(status='completed',input=dict(command='ls'),output='文件列表')))),
         ])
         con.commit();con.close()
         before=db.read_bytes()
