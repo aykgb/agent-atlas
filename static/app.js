@@ -10,6 +10,9 @@ function notice(text = '', error = false) {
   $('notice').textContent = text;
   $('notice').classList.toggle('error', error);
 }
+function setStatus(text = '') {
+  $('status').textContent = text;
+}
 const tip = $('tip');
 function showTip(html, x, y) {
   if (tip.dataset.html !== html) { tip.innerHTML = html; tip.dataset.html = html; }
@@ -80,12 +83,12 @@ async function loadRemotes() {
 }
 async function syncRemotes(target) {
   try {
-    notice('正在增量同步远端索引…');
+    setStatus('同步远端…');
     await api('/api/sync', {}, {method: 'POST', headers: {'X-Stats-Request': '1', 'Content-Type': 'application/json'}, body: JSON.stringify(target || {})});
     await metadata();
     state.page = 1;
     await load();
-  } catch (error) { notice(error.message, true); }
+  } catch (error) { notice(error.message, true); } finally { setStatus(); }
 }
 async function saveRemotes(list, target) {
   try {
@@ -291,7 +294,7 @@ function renderSessions(data) {
   $('sessionPrev').disabled = data.page <= 1; $('sessionNext').disabled = data.page >= data.pages;
 }
 async function openSession(target) {
-  notice('正在读取会话…');
+  setStatus('读取会话…');
   try {
     const data = await api('/api/session',{key:target.key,agent:target.agent,session:target.session});
     state.session = data;
@@ -302,8 +305,8 @@ async function openSession(target) {
       '<span class="subtle">来源 '+esc(data.source)+'</span>';
     $('sessionTurns').innerHTML = data.turns.map(t => '<details class="turn" data-id="'+t.id+'"><summary><div class="turn-meta"><span class="badge">'+esc(data.agent)+'</span><span>'+esc(t.model)+'</span><span>'+esc(new Date(t.timestamp).toLocaleString('zh-CN'))+'</span></div><div class="preview">'+highlight(t.preview)+'</div></summary><div class="turn-body"></div></details>').join('') || empty('该会话没有可显示的轮次。');
     $('sessionTurns').querySelectorAll('.turn').forEach(el => el.addEventListener('toggle',()=>loadTurn(el,el.dataset.id)));
-    notice();
-  } catch(error) { notice(error.message, true); }
+    notice(); setStatus();
+  } catch(error) { notice(error.message, true); setStatus(); }
 }
 function renderSearch(data) {
   const min=$('minLen').value, max=$('maxLen').value;
@@ -351,7 +354,7 @@ function addExcluded() {
 async function load() {
   const request=++state.request, tab=state.tab;
   hideTip();
-  notice('正在读取…');
+  setStatus('读取中…');
   try {
     if ($('start').value && $('end').value && $('start').value > $('end').value) throw new Error('开始日期不能晚于结束日期');
     let result;
@@ -361,8 +364,8 @@ async function load() {
     else result=await api('/api/words',{...filters(),limit:$('wordLimit').value});
     if (request!==state.request) return;
     ({usage:renderUsage,search:renderSearch,sessions:renderSessions,words:renderWords}[tab])(result);
-    notice();
-  } catch(error) {if(request===state.request) notice(error.message,true);}
+    notice(); setStatus();
+  } catch(error) {if(request===state.request){notice(error.message,true);setStatus();}}
 }
 function setTab(tab) {
   state.tab=tab;
@@ -398,10 +401,10 @@ $('reset').addEventListener('click',()=>{
   $('n').value=14;$('unit').value='day';state.page=1;state.term='';load();
 });
 async function resync() {
-  $('refresh').disabled=true; $('refresh').textContent='正在更新…'; notice('正在重建本地索引，完成后更新页面…');
+  $('refresh').disabled=true; setStatus('重建索引…');
   try {await api('/api/refresh',{}, {method:'POST',headers:{'X-Stats-Request':'1'}});await metadata();state.page=1;await load();}
   catch(error){notice(error.message,true);}
-  finally{$('refresh').disabled=false;$('refresh').textContent='↻ 刷新数据';}
+  finally{$('refresh').disabled=false;setStatus();}
 }
 $('refresh').addEventListener('click',resync);
 $('remoteForm').addEventListener('submit',event=>{
