@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 
 from stats_data import Dataset, collect, usage_values
-from stats_server import Handler, connect, period, query, rebuild
+from stats_server import Handler, connect, excluded_words, period, query, rebuild, save_excluded
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -94,13 +94,124 @@ class Contracts(unittest.TestCase):
         con.executemany('INSERT INTO part VALUES(?,?,?,?)',[
             ('p','u',1000,json.dumps(dict(type='text',text='测试'))),
             ('q','a',2000,json.dumps(dict(type='text',text='回答'))),
+            ('r','a',3000,json.dumps(dict(type='tool',tool='bash',state=dict(status='completed',input=dict(command='ls'),output='文件列表')))),
         ])
         con.commit();con.close()
         before=db.read_bytes()
         data=collect(self.home)
-        self.assertEqual(data.turns[0]['output'][0]['text'],'回答')
+        self.assertEqual([p['kind'] for p in data.turns[0]['output']],['正文','工具调用','工具结果'])
+        self.assertEqual(data.turns[0]['output'][1]['text'],'bash\n{\n  "command": "ls"\n}')
+        self.assertEqual(data.turns[0]['output'][2]['text'],'文件列表')
         self.assertEqual(data.usage[0]['out'],6)
         self.assertEqual(db.read_bytes(),before)
+
+    def test_malformed_records_become_warnings_instead_of_crashing_collect(self):
+        self.write('.pi/agent/sessions/good.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='正常输入')),
+        ])
+        bad=self.home/'.codex/sessions/bad.jsonl'
+        bad.parent.mkdir(parents=True,exist_ok=True)
+        bad.write_text(json.dumps(dict(timestamp=TS,type='turn_context',payload=[1,2]))+'\n[]\n')
+        data=collect(self.home)
+        self.assertEqual([t['input'] for t in data.turns],['正常输入'])
+        self.assertTrue(any('bad.jsonl' in warning for warning in data.warnings))
+        self.assertTrue(any('非对象' in warning for warning in data.warnings))
+
+    def test_word_index_counts_only_human_typed_input(self):
+        self.write('.claude/projects/a.jsonl',[
+            dict(type='user',uuid='u',message=dict(role='user',content='HUMANWORD')),
+            dict(type='user',uuid='c',isCompactSummary=True,message=dict(role='user',content='COMPACTWORD')),
+            dict(type='user',uuid='s',isSidechain=True,message=dict(role='user',content='SIDEWORD')),
+            dict(type='user',uuid='o',message=dict(role='user',content='<local-command-stdout>STDOUTWORD</local-command-stdout>')),
+            dict(type='user',uuid='w',message=dict(role='user',content='<!-- wt_5: /Users/clark/.worktrees/wt_5 -->\n\nHUMANWORD2')),
+        ])
+        self.write('.codex/sessions/c.jsonl',[
+            dict(type='response_item',payload=dict(id='e',type='message',role='user',content=[dict(type='input_text',text='<environment_context>ENVWORD</environment_context>')])),
+            dict(type='response_item',payload=dict(id='i',type='message',role='user',content=[dict(type='input_text',text='# AGENTS.md instructions for /tmp\n\n<INSTRUCTIONS>RULESTEXT</INSTRUCTIONS>')])),
+        ])
+        self.write('.pi/agent/sessions/s.jsonl',[
+            dict(type='message',id='k',message=dict(role='user',content='<skill name="x" location="/tmp/x">SKILLTEXT</skill>')),
+        ])
+        db=self.home/'.local/share/opencode/opencode.db'
+        db.parent.mkdir(parents=True,exist_ok=True)
+        con=sqlite3.connect(db)
+        con.executescript('CREATE TABLE message(id,session_id,time_created,data); CREATE TABLE part(id,message_id,time_created,data);')
+        con.executemany('INSERT INTO message VALUES(?,?,?,?)',[
+            ('u1','s',10,json.dumps(dict(role='user'))),
+            ('u2','s',20,json.dumps(dict(role='user'))),
+        ])
+        con.executemany('INSERT INTO part VALUES(?,?,?,?)',[
+            ('p1','u1',10,json.dumps(dict(type='text',text='<!-- main: /Users/clark/xidi-minimal -->\n\nHUMANWORD3'))),
+            ('p2','u2',20,json.dumps(dict(type='text',text='[idle-notify:busy->idle] NOTIFYWORD'))),
+        ])
+        con.commit();con.close()
+        review=self.home/'.codex/sessions/r.jsonl'
+        review.parent.mkdir(parents=True,exist_ok=True)
+        review.write_text('\n'.join(json.dumps(row) for row in [
+            dict(timestamp=TS,type='session_meta',payload=dict(id='r',source=dict(subagent=dict(other='guardian')))),
+            dict(timestamp=TS,type='response_item',payload=dict(id='m',type='message',role='user',content=[dict(type='input_text',text='REVIEWWORD')])),
+        ])+'\n')
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        terms={w['term'] for w in query(con,'/api/words',dict(limit='200'))['words']}
+        self.assertIn('humanword',terms)
+        self.assertIn('humanword2',terms)
+        self.assertIn('humanword3',terms)
+        for excluded in ('compactword','sideword','reviewword','stdoutword','envword','environment','rulestext','skilltext','worktrees','xidi','notifyword'):
+            self.assertNotIn(excluded,terms)
+        for found in ('REVIEWWORD','COMPACTWORD','SIDEWORD','STDOUTWORD','ENVWORD','RULESTEXT','SKILLTEXT','HUMANWORD2','HUMANWORD3','NOTIFYWORD'):
+            self.assertEqual(query(con,'/api/search',dict(q=found))['total'],1)
+
+    def test_command_wrapper_rounds_are_dropped_or_readable(self):
+        self.write('.claude/projects/a.jsonl',[
+            dict(type='user',uuid='c',message=dict(role='user',content='<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>')),
+            dict(type='user',uuid='w',message=dict(role='user',content='<command-message>improve-writing</command-message>\n<command-name>/improve-writing</command-name>\n<command-args>@docs/a.md</command-args>')),
+            dict(type='assistant',uuid='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='WORKRESULT')],usage=dict(input_tokens=1,output_tokens=1))),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual(query(con,'/api/search',dict(q=''))['total'],1)
+        self.assertEqual(query(con,'/api/search',dict(q='clear'))['total'],0)
+        rows=query(con,'/api/search',dict(q='improve-writing'))['rows']
+        self.assertEqual(rows[0]['preview'][:33],'/improve-writing @docs/a.md')
+        self.assertEqual(query(con,'/api/search',dict(q='WORKRESULT'))['total'],1)
+        terms={w['term'] for w in query(con,'/api/words',dict(limit='100'))['words']}
+        self.assertNotIn('command',terms)
+        self.assertNotIn('clear',terms)
+
+    def test_word_exclusions_persist_and_filter_words(self):
+        path=self.home/'words-exclude.txt'
+        self.assertEqual(save_excluded([' 用户 ','USER ','用户',7,''],path),['用户','user'])
+        self.assertEqual(excluded_words(path),['用户','user'])
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='用户 users 集群')),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        result=query(con,'/api/words',dict(limit='100'),excluded_words(path))
+        terms=[w['term'] for w in result['words']]
+        self.assertIn('users',terms)
+        self.assertNotIn('用户',terms)
+        self.assertEqual(result['excluded'],['用户','user'])
+        self.assertEqual(query(con,'/api/words',dict(limit='100'))['excluded'],[])
+
+    def test_index_is_opened_read_only(self):
+        missing=self.home/'index.sqlite'
+        with self.assertRaises(sqlite3.Error):
+            connect(missing)
+        self.assertFalse(missing.exists())
+        built=self.home/'built.sqlite'
+        rebuild(built,self.home)
+        con=connect(built)
+        self.addCleanup(con.close)
+        with self.assertRaises(sqlite3.Error):
+            con.execute('CREATE TABLE probe(x)')
 
     def test_search_matches_whole_round_and_word_index_only_counts_inputs(self):
         self.write('.pi/agent/sessions/a.jsonl',[

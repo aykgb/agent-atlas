@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Atlas · 使用统计</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Atlas · 使用统计</title><link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48"><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
 <body>
 <header><a class="brand" href="/"><span class="logo">a.</span> Agent Atlas <span class="local">LOCAL</span></a><div class="header-right"><span id="updated">正在读取索引</span><button id="refresh">↻ 刷新数据</button></div></header>
 <main>
@@ -14,7 +14,7 @@
 <article class="panel"><div class="panel-head"><h2>Agent × 模型明细</h2><span class="subtle">单位：token · 按总用量降序</span></div><div class="table-scroll"><table><thead><tr><th>Agent / 模型</th><th>调用次数</th><th>新增输入</th><th>缓存写入</th><th>缓存读取</th><th>输出</th><th>总用量</th></tr></thead><tbody id="usageRows"></tbody></table></div></article>
 </section>
 <section id="search" hidden aria-label="会话搜索"><form id="searchForm" class="search-box"><span aria-hidden="true">⌕</span><input id="q" placeholder="搜索用户输入、模型输出、思考或工具内容…" aria-label="会话搜索词"><button class="primary">搜索</button></form><div class="section-caption"><p id="searchCount">按轮次匹配 · 多个关键词用空格分隔，需全部命中</p><button id="clearTerm" hidden>清除词频筛选</button></div><div id="results"></div><div class="pagination"><button id="prev">← 上一页</button><span id="page"></span><button id="next">下一页 →</button></div></section>
-<section id="words" hidden aria-label="用户输入词频"><div class="panel"><div class="panel-head"><div><h2>你经常谈论什么？</h2><p>全部已索引会话的用户输入 · 中文分词、英文归一化、过滤常用停用词</p></div><label>展示 <select id="wordLimit"><option value="20">前 20 词</option><option value="40" selected>前 40 词</option><option value="100">前 100 词</option></select></label></div><p class="subtle">点击词语，查看包含该词的会话轮次。数字分别表示出现次数与覆盖轮次。</p><div id="wordChart"></div></div></section>
+<section id="words" hidden aria-label="用户输入词频"><div class="panel"><div class="panel-head"><div><h2>你经常谈论什么？</h2><p>已索引会话中的人工输入 · 中文分词、英文归一化、过滤常用停用词</p></div><label>展示 <select id="wordLimit"><option value="20">前 20 词</option><option value="40" selected>前 40 词</option><option value="100">前 100 词</option></select></label></div><p class="subtle">点击词语，查看包含该词的会话轮次。数字分别表示出现次数与覆盖轮次。</p><div class="exclude-box"><span>排除关键词</span><div id="excludedWords"></div><input id="excludeInput" placeholder="空格分隔，可多个" aria-label="要排除的关键词"><button id="excludeAdd">排除</button></div><div id="wordChart"></div></div></section>
 <footer><span id="coverage"></span><details id="warnings"><summary>数据口径与读取提示</summary><p>Agent 指 Claude、Codex、Pi、OpenCode、Grok。用量来自本机日志，并非账单。周从周一开始，月按自然月，当前周期截至今天。unknown 表示日志没有模型信息。</p><p>会话按用户输入至下一次用户输入划分；保留日志中可见的思考和工具内容。词频仅统计用户输入，过滤单字、纯数字和常见停用词。</p><div id="warningList"></div></details></footer>
 </main>
 </body></html>

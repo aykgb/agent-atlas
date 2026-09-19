@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Local usage dashboard and conversation index."""
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -16,7 +17,31 @@ from urllib.parse import parse_qs, urlsplit
 from stats_data import FIELDS, TOOLS, collect
 
 ROOT = Path(__file__).resolve().parent
+EXCLUDE_FILE = ROOT / 'words-exclude.txt'
 STOP = set('的 了 和 是 在 我 你 他 她 它 这 那 一个 一些 我们 你们 他们 可以 需要 使用 进行 以及 并且 如果 然后 这个 那个 不 有 就 都 也 到 与 为 对 中 将 请 把 被 要 吗 呢 啊 the a an and or is are to of in for on with this that it be as at by from you your i we'.split())
+
+
+def excluded_words(path=EXCLUDE_FILE):
+    try:
+        lines = path.read_text(encoding='utf-8').splitlines()
+    except OSError:
+        return []
+    return [term for term in (line.strip().casefold() for line in lines) if term]
+
+
+def save_excluded(words, path=EXCLUDE_FILE):
+    cleaned = []
+    for word in words:
+        if not isinstance(word, str):
+            continue
+        term = word.strip().casefold()
+        if term and len(term) <= 40 and term not in cleaned:
+            cleaned.append(term)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text('\n'.join(cleaned) + ('\n' if cleaned else ''), encoding='utf-8')
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return cleaned
 
 
 def tokenize(text):
@@ -27,7 +52,7 @@ def tokenize(text):
 
 
 def connect(path):
-    con = sqlite3.connect(path, timeout=30)
+    con = sqlite3.connect(Path(path).as_uri() + '?mode=ro', uri=True, timeout=30)
     con.row_factory = sqlite3.Row
     return con
 
@@ -38,7 +63,8 @@ def rebuild(path, home=None):
     data = collect(home)
     temporary = path.with_suffix('.building')
     temporary.unlink(missing_ok=True)
-    con = connect(temporary)
+    temporary.touch(mode=0o600)
+    con = sqlite3.connect(str(temporary), timeout=30)
     try:
         con.executescript("""
         CREATE TABLE usage(day TEXT,agent TEXT,model TEXT,new INTEGER,cc INTEGER,cr INTEGER,out INTEGER,msgs INTEGER);
@@ -68,13 +94,16 @@ def rebuild(path, home=None):
                               (t['agent'], t['session'], t['model'], t['timestamp'][:10], t['timestamp'], t['input'], json.dumps(t['output'], ensure_ascii=False), t['source'], search_text))
             tid = row.lastrowid
             con.execute('INSERT INTO search(rowid,text) VALUES(?,?)', (tid, search_text))
-            con.executemany('INSERT INTO terms VALUES(?,?,?)', [(term, tid, count) for term, count in Counter(tokenize(t['input'])).items()])
+            if t.get('words', True):
+                con.executemany('INSERT INTO terms VALUES(?,?,?)', [(term, tid, count) for term, count in Counter(tokenize(t['input'])).items()])
         meta = dict(updated=datetime.now().astimezone().isoformat(), warnings=data.warnings, sources=dict(data.sources), agents=TOOLS)
         con.executemany('INSERT INTO meta VALUES(?,?)', [(k, json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
         con.commit()
-    finally:
+    except BaseException:
         con.close()
-    os.chmod(temporary, 0o600)
+        temporary.unlink(missing_ok=True)
+        raise
+    con.close()
     os.replace(temporary, path)
 
 
@@ -119,13 +148,16 @@ def bounds(params):
 
 
 def positive(params, key, default, maximum):
-    value = int(params.get(key, default))
+    try:
+        value = int(params.get(key, default))
+    except ValueError:
+        value = 0
     if not 1 <= value <= maximum:
-        raise ValueError(f'{key} 须在 1–{maximum} 之间')
+        raise ValueError(f'{key} 须为 1–{maximum} 的整数')
     return value
 
 
-def query(con, endpoint, p):
+def query(con, endpoint, p, exclude=()):
     if endpoint == '/api/meta':
         result = {r['key']: json.loads(r['value']) for r in con.execute('SELECT * FROM meta')}
         result.update(turns=con.execute('SELECT count(*) FROM turns').fetchone()[0],
@@ -147,12 +179,15 @@ def query(con, endpoint, p):
         clauses[idx] = "instr(' · ' || model || ' · ', ?) > 0"
         values[idx] = ' · ' + p['model'] + ' · '
     if endpoint == '/api/words':
+        if exclude:
+            clauses.append('term NOT IN (' + ','.join('?' * len(exclude)) + ')')
+            values.extend(exclude)
         where = ' WHERE ' + ' AND '.join(clauses) if clauses else ''
         limit = positive(p, 'limit', 40, 200)
         words = [dict(r) for r in con.execute(
             'SELECT term,sum(count) AS count,count(*) AS turns FROM terms JOIN turns ON turns.id=terms.turn_id'
             + where + ' GROUP BY term ORDER BY count DESC,term LIMIT ?', values + [limit])]
-        return dict(words=words)
+        return dict(words=words, excluded=list(exclude))
     if endpoint == '/api/search':
         q = p.get('q', '').strip()
         if len(q) > 500:
@@ -180,7 +215,11 @@ def query(con, endpoint, p):
                 row['match'] = content[max(0, pos - 65):max(0, pos - 65) + 240]
         return dict(rows=rows, total=count, page=page, pages=(count + 19) // 20)
     if endpoint == '/api/turn':
-        row = con.execute('SELECT id,agent,session,model,timestamp,input,output,source FROM turns WHERE id=?', (int(p.get('id', 0)),)).fetchone()
+        try:
+            turn_id = int(p.get('id', 0))
+        except ValueError:
+            raise ValueError('id 须为整数')
+        row = con.execute('SELECT id,agent,session,model,timestamp,input,output,source FROM turns WHERE id=?', (turn_id,)).fetchone()
         if not row:
             raise ValueError('会话轮次不存在，请刷新搜索结果')
         result = dict(row)
@@ -220,19 +259,33 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path.startswith('/api/'):
                 p = {k: v[-1] for k, v in parse_qs(parsed.query).items()}
                 with closing(connect(self.server.db)) as con:
-                    result = query(con, parsed.path, p)
+                    result = query(con, parsed.path, p, excluded_words())
                 return self.respond(200, result)
-            assets = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css')}
+            assets = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css'), '/favicon.ico': ('favicon.ico', 'image/x-icon')}
             if parsed.path not in assets:
                 return self.respond(404, {'error': '未找到页面'})
             name, mime = assets[parsed.path]
             self.respond(200, (ROOT / 'static' / name).read_bytes(), mime + '; charset=utf-8')
-        except (ValueError, sqlite3.Error) as error:
+        except ValueError as error:
             self.respond(400, {'error': str(error)})
+        except sqlite3.Error as error:
+            self.respond(500, {'error': f'索引不可用：{error}'})
 
     def do_POST(self):
         if not self.allowed() or self.headers.get('X-Stats-Request') != '1':
             return self.respond(403, {'error': '仅允许本机同源操作'})
+        if self.path == '/api/words-exclude':
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                payload = json.loads(self.rfile.read(length) or b'{}')
+                words = payload.get('words')
+                if not isinstance(words, list):
+                    raise ValueError('words 须为数组')
+                return self.respond(200, {'ok': True, 'excluded': save_excluded(words)})
+            except ValueError as error:
+                return self.respond(400, {'error': str(error)})
+            except OSError as error:
+                return self.respond(500, {'error': f'排除词保存失败：{error}'})
         if self.path != '/api/refresh':
             return self.respond(404, {'error': '未知接口'})
         if not self.server.refresh_lock.acquire(blocking=False):
@@ -257,7 +310,8 @@ def main():
     args = parser.parse_args()
     directory = ROOT / '.stats'
     directory.mkdir(mode=0o700, exist_ok=True)
-    path = directory / 'index.sqlite'
+    suffix = '' if args.home is None else '-' + hashlib.sha256(str(Path(args.home).resolve()).encode()).hexdigest()[:8]
+    path = directory / f'index{suffix}.sqlite'
     if args.reindex or args.home or not path.exists():
         print('正在读取本机会话并构建索引…', flush=True)
         rebuild(path, args.home)

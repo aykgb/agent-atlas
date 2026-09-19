@@ -1,5 +1,6 @@
 """Read local agent logs into usage events and searchable conversation turns."""
 import json
+import re
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
@@ -7,6 +8,28 @@ from pathlib import Path
 
 TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok')
 FIELDS = ('new', 'cc', 'cr', 'out', 'msgs')
+GENERATED = ('environment_context', 'recommended_plugins', 'codex_delegation', 'turn_aborted', 'skill',
+             'user_instructions', 'system-reminder', 'local-command-stdout', 'bash-stdout', 'bash-stderr',
+             'task-notification', 'codex_internal_context', 'in-app-browser-context')
+GENERATED_RE = re.compile(r'\s*<(?:' + '|'.join(GENERATED) + r')(?:\s[^>]*)?>'
+                          r'|\s*#\s*AGENTS\.md instructions for '
+                          r'|\s*## Referenced chats with Codex:'
+                          r'|\s*## Code review guidelines:'
+                          r'|\s*\[idle-notify:')
+COMMENT_RE = re.compile(r'\s*<!--.*?-->', re.S)
+COMMAND_NAME_RE = re.compile(r'<command-name>(.*?)</command-name>', re.S)
+COMMAND_MESSAGE_RE = re.compile(r'<command-message>(.*?)</command-message>', re.S)
+COMMAND_ARGS_RE = re.compile(r'<command-args>(.*?)</command-args>', re.S)
+
+
+def command_input(value):
+    if not value.lstrip().startswith('<command'):
+        return None
+    name = COMMAND_NAME_RE.search(value) or COMMAND_MESSAGE_RE.search(value)
+    args = COMMAND_ARGS_RE.search(value)
+    label = name.group(1).strip() if name else ''
+    argument = args.group(1).strip() if args else ''
+    return ' '.join(part for part in (label, argument) if part) or None
 
 
 def stamp(value):
@@ -19,14 +42,28 @@ def stamp(value):
 
 
 def read_jsonl(path, warnings):
+    skipped = 0
     with path.open(encoding='utf-8', errors='replace') as stream:
         for number, line in enumerate(stream, 1):
             try:
                 value = json.loads(line)
                 if isinstance(value, dict):
                     yield value
+                else:
+                    skipped += 1
             except ValueError:
                 warnings.append(f'{path.name}:{number} 无法解析，已跳过')
+    if skipped:
+        warnings.append(f'{path.name}: {skipped} 条非对象记录已跳过')
+
+
+def clean_input(value):
+    comment = COMMENT_RE.match(value)
+    return value[comment.end():].strip() if comment else value
+
+
+def machine_input(value):
+    return bool(GENERATED_RE.match(value))
 
 
 def text_of(value):
@@ -53,9 +90,12 @@ def blocks(content, role='assistant', channel=None):
         typ = part.get('type', '')
         if role in ('tool', 'toolResult') or typ == 'tool_result':
             kind, value = '工具结果', text_of(part.get('content', part))
-        elif typ in ('tool_use', 'toolCall', 'tool'):
+        elif typ == 'tool':
             kind = '工具调用'
-            value = part.get('name', part.get('tool', '')) + '\n' + json.dumps(part.get('input', part.get('arguments', part.get('state', {}))), ensure_ascii=False, indent=2)
+            value = part.get('name', part.get('tool', '')) + '\n' + json.dumps((part.get('state') or {}).get('input', {}), ensure_ascii=False, indent=2)
+        elif typ in ('tool_use', 'toolCall'):
+            kind = '工具调用'
+            value = part.get('name', part.get('tool', '')) + '\n' + json.dumps(part.get('input', part.get('arguments', {})), ensure_ascii=False, indent=2)
         elif typ in ('thinking', 'reasoning'):
             kind, value = '思考', text_of(part)
         else:
@@ -93,8 +133,8 @@ class Dataset:
             return
         if identity in self.seen:
             existing = self.seen[identity]
-            for key, value in zip(FIELDS, usage_values(agent, usage)):
-                existing[key] = max(existing[key], value)
+            for field, value in zip(FIELDS, usage_values(agent, usage)):
+                existing[field] = max(existing[field], value)
             return
         ts = stamp(ts)
         if not ts:
@@ -109,6 +149,7 @@ class Dataset:
         records = list(read_jsonl(path, self.warnings))
         self.sources[agent] += 1
         session = path.parent.name if agent == 'grok' else path.stem
+        generated = path.parent.name == 'subagents'
         current = None
         model = 'unknown'
         previous_total = None
@@ -117,14 +158,23 @@ class Dataset:
         turn_id = None
         has_response_user = any(d.get('type') == 'response_item' and (d.get('payload') or {}).get('role') == 'user' for d in records)
 
-        def user(value, ts, identity, append=False):
+        def user(value, ts, identity, append=False, words=True):
             nonlocal current
+            value = clean_input(value or '')
             if not value:
                 return
+            command = command_input(value)
+            if command is not None:
+                value = command
             if append and current:
                 current['input'] += value
                 return
             current = dict(agent=agent, session=session, model=model, timestamp=stamp(ts), input=value, output=[], source=str(path), key=str(identity))
+            if command is not None:
+                current['command'] = True
+                current['words'] = False
+            elif not words or machine_input(value):
+                current['words'] = False
             self.turns.append(current)
 
         def output(parts, join=False):
@@ -161,7 +211,8 @@ class Dataset:
                         output(blocks(tool_parts))
                         content = [p for p in content if p.get('type') != 'tool_result']
                     if not d.get('isMeta'):
-                        user(text_of(content), ts, identity)
+                        user(text_of(content), ts, identity,
+                             words=not (generated or d.get('isCompactSummary') or d.get('isSidechain')))
                 elif role in ('assistant', 'toolResult'):
                     output(blocks(content, role))
                 if role == 'assistant' and m.get('usage'):
@@ -172,6 +223,7 @@ class Dataset:
                 p = d.get('payload') or {}
                 if typ == 'session_meta':
                     session = p.get('id') or session
+                    generated = generated or (isinstance(p.get('source'), dict) and 'subagent' in p['source'])
                 if typ == 'turn_context':
                     model = p.get('model') or model
                     turn_id = p.get('turn_id')
@@ -187,7 +239,7 @@ class Dataset:
                     previous_total = total
                     self.add_usage(agent, session, model, ts, info.get('last_token_usage'), (session, d.get('ordinal', index)))
                 if typ == 'event_msg' and p.get('type') == 'user_message' and not has_response_user:
-                    user(p.get('message', ''), ts, index)
+                    user(p.get('message', ''), ts, index, words=not generated)
                 if typ != 'response_item':
                     continue
                 identity = p.get('id') or d.get('ordinal', index)
@@ -200,7 +252,7 @@ class Dataset:
                     kinds = (p.get('internal_chat_message_metadata_passthrough') or {}).get('content_item_kinds')
                     if kinds and len(kinds) == len(content):
                         content = [item for item, kind in zip(content, kinds) if kind.startswith('user.')]
-                    user(text_of(content), ts, identity)
+                    user(text_of(content), ts, identity, words=not generated)
                 elif pt == 'message' and p.get('role') == 'assistant':
                     output(blocks(p.get('content'), channel=p.get('channel')))
                 elif pt == 'reasoning':
@@ -235,6 +287,7 @@ class Dataset:
                     for name, values in (usage.get('modelUsage') or {model: usage}).items():
                         self.add_usage(agent, session, name, ts, values, (identity, name))
                     prompt_index = None
+        self.turns = [t for t in self.turns if not (t.get('command') and not t['output'])]
 
     def read_opencode(self, path):
         self.sources['opencode'] += 1
@@ -249,9 +302,11 @@ class Dataset:
                 role = m.get('role')
                 model = m.get('modelID') or (m.get('model') or {}).get('modelID') or 'unknown'
                 if role == 'user':
-                    value = text_of([p for p in parts[mid] if not p.get('synthetic')])
+                    value = clean_input(text_of([p for p in parts[mid] if not p.get('synthetic')]))
                     if value:
                         turn = dict(agent='opencode', session=sid, model=model, timestamp=stamp(ts), input=value, output=[], source=str(path), key=mid)
+                        if machine_input(value):
+                            turn['words'] = False
                         self.turns.append(turn)
                         current[(sid, mid)] = turn
                         current[sid] = turn
@@ -282,12 +337,12 @@ def collect(home=None):
         for path in sorted(paths):
             try:
                 data.read_file(agent, path)
-            except (OSError, ValueError, TypeError) as error:
+            except (OSError, ValueError, TypeError, AttributeError) as error:
                 data.warnings.append(f'{agent}/{path.name}: {error}')
     db = home / '.local/share/opencode/opencode.db'
     if db.exists():
         try:
             data.read_opencode(db)
-        except (sqlite3.Error, ValueError, OSError) as error:
+        except (sqlite3.Error, ValueError, OSError, TypeError, AttributeError) as error:
             data.warnings.append(f'opencode: {error}')
     return data

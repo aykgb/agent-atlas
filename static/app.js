@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const colors = ['#6484d8', '#71b3a2', '#b49acb', '#e2b274', '#de8999', '#87acc8', '#a5b677', '#9299ad'];
-const state = {tab: 'usage', page: 1, term: '', usage: null, request: 0};
+const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0};
 const number = n => Number(n || 0).toLocaleString('en-US');
 const compact = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : number(n);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -140,11 +140,28 @@ function renderSearch(data) {
   $('prev').disabled = data.page <= 1; $('next').disabled = data.page >= data.pages;
 }
 function renderWords(data) {
+  state.excluded = data.excluded || [];
   const maximum = Math.max(...data.words.map(w=>w.count),1);
-  $('wordChart').innerHTML = data.words.map(w=>'<button class="word-row" data-term="'+esc(w.term)+'" title="'+esc(w.term)+'：'+number(w.count)+' 次 / '+number(w.turns)+' 轮"><span class="word-label">'+esc(w.term)+'</span><div class="word-track"><div class="word-fill" style="width:'+(w.count/maximum*100)+'%"></div></div><span class="word-count">'+number(w.count)+' / '+number(w.turns)+'</span></button>').join('') || empty('当前筛选下没有可统计的输入词语。');
-  $('wordChart').querySelectorAll('button').forEach(button=>button.addEventListener('click',()=>{
+  $('wordChart').innerHTML = data.words.map(w=>'<div class="word-item"><button class="word-row" data-term="'+esc(w.term)+'" title="'+esc(w.term)+'：'+number(w.count)+' 次 / '+number(w.turns)+' 轮"><span class="word-label">'+esc(w.term)+'</span><div class="word-track"><div class="word-fill" style="width:'+(w.count/maximum*100)+'%"></div></div><span class="word-count">'+number(w.count)+' / '+number(w.turns)+'</span></button><button class="word-exclude" data-term="'+esc(w.term)+'" title="排除「'+esc(w.term)+'」" aria-label="排除 '+esc(w.term)+'">×</button></div>').join('') || empty('当前筛选下没有可统计的输入词语。');
+  $('wordChart').querySelectorAll('.word-row').forEach(button=>button.addEventListener('click',()=>{
     state.term=button.dataset.term; $('q').value=''; state.page=1; setTab('search');
   }));
+  $('wordChart').querySelectorAll('.word-exclude').forEach(button=>button.addEventListener('click',()=>saveExcluded([...state.excluded,button.dataset.term])));
+  $('excludedWords').innerHTML = state.excluded.map(term=>'<button class="chip" data-term="'+esc(term)+'" title="点击恢复「'+esc(term)+'」">'+esc(term)+' ×</button>').join('');
+  $('excludedWords').querySelectorAll('.chip').forEach(chip=>chip.addEventListener('click',()=>saveExcluded(state.excluded.filter(term=>term!==chip.dataset.term))));
+}
+async function saveExcluded(words) {
+  try {
+    const result = await api('/api/words-exclude',{}, {method:'POST',headers:{'X-Stats-Request':'1','Content-Type':'application/json'},body:JSON.stringify({words})});
+    state.excluded = result.excluded;
+    await load();
+  } catch(error) {notice(error.message,true);}
+}
+function addExcluded() {
+  const words=$('excludeInput').value.split(/[\s,，、]+/).filter(Boolean);
+  if (!words.length) return;
+  $('excludeInput').value='';
+  saveExcluded([...state.excluded,...words]);
 }
 async function load() {
   const request=++state.request, tab=state.tab;
@@ -177,6 +194,8 @@ $('searchForm').addEventListener('submit',e=>{e.preventDefault();state.page=1;st
 $('prev').addEventListener('click',()=>{state.page--;load();});
 $('next').addEventListener('click',()=>{state.page++;load();});
 $('clearTerm').addEventListener('click',()=>{state.term='';state.page=1;load();});
+$('excludeAdd').addEventListener('click',addExcluded);
+$('excludeInput').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();addExcluded();}});
 $('allDates').addEventListener('click',()=>{$('start').value='';$('end').value='';state.page=1;load();});
 $('reset').addEventListener('click',()=>{
   for(const id of ['agent','model','start','end','q']) $(id).value='';
