@@ -28,7 +28,13 @@
 
 ## 实测
 
-（完成后填写）
+- 契约测试：新增 `test_words_order_ascending_and_descending`，覆盖默认行为（desc）、显式 desc、asc 取最低频次 N 词、同频次按 term 升序、非法 order 报错（400），并在 `test_query_merges_local_and_enabled_remote_sources` 验证远端合并场景；运行 `unittest`（32 项）全过。
+- 语法检查：`node --check static/app.js` 通过。
+- 接口实测：
+  - `GET /api/words?limit=5` 返回最高前 5 词（pi 109, 提交 78, admin 72...）；
+  - `GET /api/words?limit=5&order=asc` 返回频次最低 5 词（均为 count=1，按 term 升序）；
+  - `GET /api/words?order=invalid` 返回 400 `{"error": "order 须为 desc 或 asc"}`。
+- 前端实测：方向切换联动更新选择器文案（「前 N 词」↔「末 N 词」），条形图按当前集合内最大值归一渲染。
 
 ## 非目标
 

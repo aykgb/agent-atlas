@@ -659,6 +659,9 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
         return dict(rows=rows, buckets=buckets, start=start, end=end)
     if endpoint == '/api/words':
         limit = positive(p, 'limit', 40, 200)
+        order = p.get('order', 'desc') or 'desc'
+        if order not in ('desc', 'asc'):
+            raise ValueError('order 须为 desc 或 asc')
         merged = {}
         for source in sources:
             if not source.words:
@@ -679,7 +682,7 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 entry[0] += row['count']
                 entry[1] += row['turns']
         words = [dict(term=term, count=count, turns=turns) for term, (count, turns) in merged.items()]
-        words.sort(key=lambda word: (-word['count'], word['term']))
+        words.sort(key=lambda word: (word['count'] if order == 'asc' else -word['count'], word['term']))
         return dict(words=words[:limit], excluded=list(exclude))
     if endpoint == '/api/search':
         q = p.get('q', '').strip()

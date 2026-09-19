@@ -230,6 +230,30 @@ class Contracts(unittest.TestCase):
         self.assertEqual(result['excluded'],['用户','user'])
         self.assertEqual(query(con,'/api/words',dict(limit='100'))['excluded'],[])
 
+    def test_words_order_ascending_and_descending(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='alpha alpha alpha beta beta gamma delta')),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        default_res=query(con,'/api/words',dict(limit='40'))
+        self.assertEqual([(w['term'],w['count']) for w in default_res['words']],
+                         [('alpha',3),('beta',2),('delta',1),('gamma',1)])
+        desc_res=query(con,'/api/words',dict(limit='2',order='desc'))
+        self.assertEqual([(w['term'],w['count']) for w in desc_res['words']],
+                         [('alpha',3),('beta',2)])
+        asc_res=query(con,'/api/words',dict(limit='2',order='asc'))
+        self.assertEqual([(w['term'],w['count']) for w in asc_res['words']],
+                         [('delta',1),('gamma',1)])
+        asc_all=query(con,'/api/words',dict(limit='40',order='asc'))
+        self.assertEqual([(w['term'],w['count']) for w in asc_all['words']],
+                         [('delta',1),('gamma',1),('beta',2),('alpha',3)])
+        with self.assertRaises(ValueError) as ctx:
+            query(con,'/api/words',dict(order='random'))
+        self.assertIn('order 须为 desc 或 asc',str(ctx.exception))
+
     def test_index_is_opened_read_only(self):
         missing=self.home/'index.sqlite'
         with self.assertRaises(sqlite3.Error):
@@ -500,6 +524,9 @@ class Contracts(unittest.TestCase):
         terms={w['term'] for w in query(con,'/api/words',dict(limit='100'),sources=sources)['words']}
         self.assertIn('localword',terms)
         self.assertIn('remoteword',terms)
+        asc_terms={w['term'] for w in query(con,'/api/words',dict(limit='100',order='asc'),sources=sources)['words']}
+        self.assertIn('localword',asc_terms)
+        self.assertIn('remoteword',asc_terms)
         search=query(con,'/api/search',dict(q='REMOTEWORD'),sources=sources)
         self.assertEqual(search['total'],1)
         remote_id=search['rows'][0]['id']

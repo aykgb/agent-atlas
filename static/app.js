@@ -361,11 +361,15 @@ async function load() {
     if (tab==='usage') result=await api('/api/usage',{agent:$('agent').value,model:$('model').value,n:$('n').value,unit:$('unit').value});
     else if (tab==='search') result=await api('/api/search',{...filters(),q:$('q').value,page:state.page,term:state.term,minlen:$('minLen').value,maxlen:$('maxLen').value});
     else if (tab==='sessions') result=await api('/api/sessions',{agent:$('agent').value,page:state.sessionPage});
-    else result=await api('/api/words',{...filters(),limit:$('wordLimit').value});
+    else result=await api('/api/words',{...filters(),limit:$('wordLimit').value,order:$('wordOrder').value});
     if (request!==state.request) return;
     ({usage:renderUsage,search:renderSearch,sessions:renderSessions,words:renderWords}[tab])(result);
     notice(); setStatus();
   } catch(error) {if(request===state.request){notice(error.message,true);setStatus();}}
+}
+function updateWordLimitLabels() {
+  const prefix = $('wordOrder').value === 'asc' ? '末 ' : '前 ';
+  for (const opt of $('wordLimit').options) opt.textContent = prefix + opt.value + ' 词';
 }
 function setTab(tab) {
   state.tab=tab;
@@ -381,6 +385,7 @@ function setTab(tab) {
 }
 document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
 for(const id of ['agent','model','n','unit','start','end','wordLimit','minLen','maxLen']) $(id).addEventListener('change',()=>{state.page=1;state.sessionPage=1;load();});
+$('wordOrder').addEventListener('change',()=>{updateWordLimitLabels();load();});
 $('group').addEventListener('change',renderCharts);
 $('bars').addEventListener('dblclick',event=>{
   const rect=event.target.closest('rect');
