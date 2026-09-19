@@ -4,9 +4,12 @@ import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from stats_data import Dataset, collect, usage_values
-from stats_server import LOOPBACK, Handler, allowed_hosts, connect, excluded_words, period, query, rebuild, save_excluded
+from stats_server import (LOOPBACK, Handler, allowed_hosts, clean_remotes, connect, excluded_words,
+                          load_remotes, period, query, rebuild, remotes_payload, save_excluded,
+                          save_remotes)
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -27,8 +30,8 @@ class Contracts(unittest.TestCase):
         self.home = Path(self.temp.name)
         self.addCleanup(self.temp.cleanup)
 
-    def write(self, relative, rows):
-        path = self.home / relative
+    def write(self, relative, rows, home=None):
+        path = (home or self.home) / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('\n'.join(json.dumps(dict(timestamp=TS, **row)) for row in rows) + '\n')
         return path
@@ -259,6 +262,142 @@ class Contracts(unittest.TestCase):
         self.assertEqual(period('month',2,today),('2025-12-01','2026-01-02',['2025-12','2026-01']))
         self.assertEqual(period('week',2,today)[2],['2025-12-22','2025-12-29'])
         self.assertEqual(len(period('day',14,today)[2]),14)
+
+    def test_export_serves_usage_and_paged_turns(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='导出 甲')),
+            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=5,output=1))),
+            dict(type='message',id='v',message=dict(role='user',content='导出 乙')),
+            dict(type='message',id='b',message=dict(role='assistant',model='m',content=[dict(type='text',text='再答')],usage=dict(input=3,output=1))),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        usage=query(con,'/api/export',dict(section='usage'))
+        self.assertEqual(len(usage['usage']),1)
+        self.assertEqual(usage['usage'][0]['msgs'],2)
+        self.assertTrue(usage['meta']['updated'])
+        first=query(con,'/api/export',dict(section='turns',limit='1'))
+        self.assertEqual(len(first['turns']),1)
+        self.assertIn('meta',first)
+        self.assertIsNotNone(first['cursor'])
+        self.assertIsInstance(first['turns'][0]['output'],list)
+        self.assertTrue(first['turns'][0]['terms'])
+        second=query(con,'/api/export',dict(section='turns',limit='1',cursor=str(first['cursor'])))
+        self.assertEqual(len(second['turns']),1)
+        self.assertIsNone(second['cursor'])
+        self.assertNotIn('meta',second)
+        with self.assertRaises(ValueError):
+            query(con,'/api/export',dict(section='nope'))
+
+    def test_remotes_config_validates_dedupes_and_forces_words_to_search(self):
+        path=self.home/'remotes.json'
+        self.assertEqual(clean_remotes([
+            dict(host=' Desk.local ',port='28763',usage=True,search=False,words=True),
+            dict(host='desk.local',port=28763),
+            dict(host='',port=1),
+            dict(host='ok.local',port=70000),
+            'junk',
+        ]),[dict(host='desk.local',port=28763,usage=True,search=True,words=True)])
+        saved=save_remotes([dict(host=' Desk.local ',port='28763',usage=True,search=False,words=True)],path)
+        self.assertEqual(saved,[dict(host='desk.local',port=28763,usage=True,search=True,words=True)])
+        self.assertEqual(load_remotes(path),saved)
+        with self.assertRaises(ValueError):
+            save_remotes([dict(host='x.local',port=0)],path)
+        with self.assertRaises(ValueError):
+            save_remotes([dict(host='x.local',port=1),'junk'],path)
+        self.assertEqual(load_remotes(path),saved)
+        (self.home/'broken.json').write_text('{nope',encoding='utf-8')
+        self.assertEqual(load_remotes(self.home/'broken.json'),[])
+
+    def test_remote_import_merges_usage_sessions_and_words(self):
+        remote_home=self.home/'remote'
+        remote_home.mkdir()
+        self.write('.pi/agent/sessions/r.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='REMOTEWORD 远端问题')),
+            dict(type='message',id='a',message=dict(role='assistant',model='remote-model',content=[dict(type='text',text='远端回答')],usage=dict(input=7,output=3))),
+        ],home=remote_home)
+        remote_db=self.home/'remote.sqlite'
+        rebuild(remote_db,remote_home)
+        remote_con=connect(remote_db)
+        self.addCleanup(remote_con.close)
+        def fetch(remote,path):
+            parsed=urlsplit(path)
+            return query(remote_con,parsed.path,{k:v[-1] for k,v in parse_qs(parsed.query).items()})
+        local_home=self.home/'local'
+        local_home.mkdir()
+        self.write('.pi/agent/sessions/l.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='LOCALWORD 本地问题')),
+            dict(type='message',id='a',message=dict(role='assistant',model='local-model',content=[dict(type='text',text='本地回答')],usage=dict(input=2,output=1))),
+        ],home=local_home)
+        remote=dict(host='desk.local',port=28763,usage=True,search=True,words=True)
+        db=self.home/'merged.sqlite'
+        rebuild(db,local_home,[remote],fetch)
+        con=connect(db)
+        self.addCleanup(con.close)
+        meta=query(con,'/api/meta',{})
+        self.assertEqual(meta['turns'],2)
+        self.assertEqual(meta['sessions'],2)
+        self.assertIsNone(meta['remotes'][0]['error'])
+        self.assertEqual(meta['remotes'][0]['turns'],1)
+        self.assertEqual(query(con,'/api/search',dict(q='REMOTEWORD'))['total'],1)
+        self.assertEqual(query(con,'/api/search',dict(q='LOCALWORD'))['total'],1)
+        terms={w['term'] for w in query(con,'/api/words',dict(limit='100'))['words']}
+        self.assertIn('remoteword',terms)
+        self.assertIn('localword',terms)
+        turn=query(con,'/api/turn',dict(id=query(con,'/api/search',dict(q='REMOTEWORD'))['rows'][0]['id']))
+        self.assertTrue(turn['source'].startswith('desk.local:28763 · '))
+        self.assertEqual(turn['output'],[dict(kind='正文',text='远端回答')])
+        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'))['rows']),13)
+        config=self.home/'remotes.json'
+        save_remotes([remote],config)
+        self.assertEqual(remotes_payload(con,config)['remotes'][0]['status']['turns'],1)
+
+    def test_remote_import_can_limit_to_usage(self):
+        remote_home=self.home/'usage-only'
+        remote_home.mkdir()
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='ONLYUSAGEWORD')),
+            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=4,output=2))),
+        ],home=remote_home)
+        remote_db=self.home/'usage-only.sqlite'
+        rebuild(remote_db,remote_home)
+        remote_con=connect(remote_db)
+        self.addCleanup(remote_con.close)
+        def fetch(remote,path):
+            parsed=urlsplit(path)
+            return query(remote_con,parsed.path,{k:v[-1] for k,v in parse_qs(parsed.query).items()})
+        local_home=self.home/'usage-local'
+        local_home.mkdir()
+        self.write('.pi/agent/sessions/b.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='LOCALONLY')),
+        ],home=local_home)
+        db=self.home/'usage-merged.sqlite'
+        rebuild(db,local_home,[dict(host='r.local',port=1,usage=True,search=False,words=False)],fetch)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual(query(con,'/api/meta',{})['turns'],1)
+        self.assertEqual(query(con,'/api/search',dict(q='ONLYUSAGEWORD'))['total'],0)
+        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'))['rows']),6)
+        self.assertEqual(query(con,'/api/meta',{})['remotes'][0]['turns'],0)
+
+    def test_remote_import_failure_keeps_local_data_and_warns(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='KEEPWORD')),
+            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=1,output=1))),
+        ])
+        def broken(remote,path):
+            raise OSError('unreachable')
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home,[dict(host='10.0.0.9',port=1,usage=True,search=True,words=True)],broken)
+        con=connect(db)
+        self.addCleanup(con.close)
+        meta=query(con,'/api/meta',{})
+        self.assertEqual(meta['turns'],1)
+        self.assertIn('unreachable',meta['remotes'][0]['error'])
+        self.assertTrue(any('汇入失败' in warning for warning in meta['warnings']))
+        self.assertEqual(query(con,'/api/search',dict(q='KEEPWORD'))['total'],1)
 
     def test_http_security_rejects_foreign_hosts_and_origins(self):
         self.assertTrue(fake_handler('127.0.0.1:18763').allowed())

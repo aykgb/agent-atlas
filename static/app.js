@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const colors = ['#6484d8', '#71b3a2', '#b49acb', '#e2b274', '#de8999', '#87acc8', '#a5b677', '#9299ad'];
-const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true};
+const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: []};
 const number = n => Number(n || 0).toLocaleString('en-US');
 const compact = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : number(n);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -47,6 +47,36 @@ function highlight(text) {
   const expression = new RegExp('(' + words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|') + ')', 'gi');
   return String(text).split(expression).map((part, i) => i % 2 ? '<mark>' + esc(part) + '</mark>' : esc(part)).join('');
 }
+function renderRemotes() {
+  const list = state.remotes || [];
+  $('remotes').hidden = !state.writable;
+  $('remoteSummary').textContent = list.length ? '（' + list.length + ' 台）' : '（未配置）';
+  $('remoteList').innerHTML = list.map((r, index) => {
+    const tags = [r.usage && '用量', r.search && '会话', r.words && '词频'].filter(Boolean).map(esc).join(' · ');
+    const status = r.status ? (r.status.error
+      ? '<span class="remote-bad" title="' + esc(r.status.error) + '">同步失败</span>'
+      : '<span class="remote-good">' + number(r.status.turns) + ' 轮已同步</span>')
+      : '<span class="subtle">未同步</span>';
+    return '<div class="remote-row"><b>' + esc(r.host) + ':' + r.port + '</b><span class="subtle">' + tags + '</span>' + status + '<button class="text-button" data-index="' + index + '">移除</button></div>';
+  }).join('');
+  $('remoteList').querySelectorAll('button[data-index]').forEach(button => button.addEventListener('click', () =>
+    saveRemotes(state.remotes.filter((_, index) => index !== +button.dataset.index))));
+}
+async function loadRemotes() {
+  try {
+    state.remotes = (await api('/api/remotes')).remotes || [];
+  } catch (error) {
+    state.remotes = [];
+  }
+  renderRemotes();
+}
+async function saveRemotes(list) {
+  try {
+    state.remotes = (await api('/api/remotes', {}, {method: 'POST', headers: {'X-Stats-Request': '1', 'Content-Type': 'application/json'}, body: JSON.stringify({remotes: list})})).remotes;
+    renderRemotes();
+    await resync();
+  } catch (error) { notice(error.message, true); }
+}
 async function metadata() {
   const data = await api('/api/meta');
   for (const [id, values, label] of [['agent', data.agents, '全部 agent'], ['model', data.models, '全部模型']]) {
@@ -59,6 +89,7 @@ async function metadata() {
   $('excludeInput').hidden = !state.writable;
   $('excludeAdd').hidden = !state.writable;
   document.querySelector('.local').textContent = state.writable ? 'LOCAL' : 'REMOTE';
+  if (state.writable) await loadRemotes(); else renderRemotes();
   $('updated').textContent = '更新于 ' + new Date(data.updated).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
   $('coverage').textContent = number(data.sessions) + ' 个会话 · ' + number(data.turns) + ' 轮输入 · 数据仅保存在本机' + (state.writable ? '' : ' · 远端只读');
   $('warningList').textContent = data.warnings.length ? data.warnings.join('\n') : '各数据源读取完成，无解析异常。';
@@ -237,10 +268,20 @@ $('reset').addEventListener('click',()=>{
   for(const id of ['agent','model','start','end','q']) $(id).value='';
   $('n').value=14;$('unit').value='day';state.page=1;state.term='';load();
 });
-$('refresh').addEventListener('click',async()=>{
+async function resync() {
   $('refresh').disabled=true; $('refresh').textContent='正在更新…'; notice('正在重建本地索引，完成后更新页面…');
   try {await api('/api/refresh',{}, {method:'POST',headers:{'X-Stats-Request':'1'}});await metadata();state.page=1;await load();}
   catch(error){notice(error.message,true);}
   finally{$('refresh').disabled=false;$('refresh').textContent='↻ 刷新数据';}
+}
+$('refresh').addEventListener('click',resync);
+$('remoteForm').addEventListener('submit',event=>{
+  event.preventDefault();
+  const host=$('remoteHost').value.trim(), port=Number($('remotePort').value);
+  if (!host || !Number.isInteger(port) || port<1 || port>65535) return notice('填写有效的主机与端口',true);
+  $('remoteHost').value='';
+  saveRemotes([...(state.remotes||[]).filter(r=>r.host!==host||r.port!==port),{host,port,usage:$('remoteUsage').checked,search:$('remoteSearch').checked,words:$('remoteWords').checked}]);
 });
+$('remoteWords').addEventListener('change',()=>{if($('remoteWords').checked)$('remoteSearch').checked=true;});
+$('remoteSearch').addEventListener('change',()=>{if(!$('remoteSearch').checked)$('remoteWords').checked=false;});
 metadata().then(load).catch(error=>notice(error.message,true));

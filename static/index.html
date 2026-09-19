@@ -7,6 +7,11 @@
 <div class="intro"><div class="eyebrow">YOUR WORK, IN PERSPECTIVE</div><h1>看见每一次思考。</h1><p>从模型用量到会话细节，在一个地方了解你的 AI 工作方式。</p></div>
 <nav aria-label="页面"><button data-tab="usage" class="active" aria-current="page">用量概览</button><button data-tab="search">会话搜索</button><button data-tab="words">输入词频</button></nav>
 <div class="filters"><label>Agent <select id="agent"><option value="">全部 agent</option></select></label><label>模型 <select id="model"><option value="">全部模型</option></select></label><div id="periodControls"><span>最近</span><input id="n" type="number" min="1" max="366" value="14" aria-label="最近周期数量"><select id="unit" aria-label="周期"><option value="day">天</option><option value="week">周</option><option value="month">月</option></select></div><div id="dateControls" hidden><label>从 <input type="date" id="start"></label><label>至 <input type="date" id="end"></label><button id="allDates">全部时间</button></div><button class="text-button" id="reset">重置筛选</button></div>
+<details id="remotes" class="remotes" hidden><summary>远端主机 <span id="remoteSummary">（未配置）</span></summary>
+<p class="subtle">汇入其他机器上同一服务的索引：用量、会话搜索、词频。保存后重建本地索引并从远端拉取；远端需运行同一版本，词频需要会话索引。</p>
+<div id="remoteList"></div>
+<form id="remoteForm"><input id="remoteHost" placeholder="主机或 IP" aria-label="远端主机"><input id="remotePort" type="number" min="1" max="65535" value="18763" aria-label="远端端口"><label><input type="checkbox" id="remoteUsage" checked> 用量</label><label><input type="checkbox" id="remoteSearch" checked> 会话索引</label><label><input type="checkbox" id="remoteWords" checked> 词频索引</label><button class="primary">添加并同步</button></form>
+</details>
 <div id="notice" role="status" aria-live="polite"></div>
 <section id="usage" aria-label="用量概览">
 <div class="metrics"><article><span>总用量 · Tokens</span><strong id="total">—</strong><small id="range">—</small></article><article><span>新增输入</span><strong id="input">—</strong><small>不含缓存的输入 token</small></article><article><span>缓存用量</span><strong id="cache">—</strong><small id="cacheDetail">读取 + 写入</small></article><article><span>模型输出</span><strong id="output">—</strong><small>包含思考 token</small></article></div>

@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import threading
+import urllib.request
 from collections import Counter, defaultdict
 from contextlib import closing
 from datetime import date, datetime, timedelta
@@ -18,6 +19,7 @@ from stats_data import FIELDS, TOOLS, collect
 
 ROOT = Path(__file__).resolve().parent
 EXCLUDE_FILE = ROOT / 'words-exclude.txt'
+REMOTES_FILE = ROOT / 'remotes.json'
 STOP = set('的 了 和 是 在 我 你 他 她 它 这 那 一个 一些 我们 你们 他们 可以 需要 使用 进行 以及 并且 如果 然后 这个 那个 不 有 就 都 也 到 与 为 对 中 将 请 把 被 要 吗 呢 啊 the a an and or is are to of in for on with this that it be as at by from you your i we'.split())
 LOOPBACK = frozenset({'127.0.0.1', 'localhost', '::1'})
 DEFAULT_ALLOWED = ('100.64.216.70',)
@@ -32,6 +34,66 @@ def allowed_hosts(bind='127.0.0.1', extra=()):
         if name:
             names.add(name)
     return names
+
+
+def clean_remotes(entries, strict=False):
+    if not isinstance(entries, list):
+        if strict:
+            raise ValueError('remotes 须为数组')
+        return []
+    remotes, seen = [], set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            if strict:
+                raise ValueError('每台远端须为对象')
+            continue
+        host = urlsplit('//' + str(entry.get('host', '')).strip()).hostname
+        try:
+            port = int(entry.get('port'))
+        except (TypeError, ValueError):
+            port = 0
+        if not host or not 1 <= port <= 65535:
+            if strict:
+                raise ValueError('主机或端口无效')
+            continue
+        if (host, port) in seen:
+            continue
+        seen.add((host, port))
+        sections = {key: bool(entry.get(key, True)) for key in ('usage', 'search', 'words')}
+        sections['search'] = sections['search'] or sections['words']
+        remotes.append({'host': host, 'port': port, **sections})
+    return remotes
+
+
+def load_remotes(path=REMOTES_FILE):
+    try:
+        return clean_remotes(json.loads(path.read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        return []
+
+
+def save_remotes(entries, path=REMOTES_FILE):
+    remotes = clean_remotes(entries, strict=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(remotes, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return remotes
+
+
+def fetch_remote(remote, path, timeout=30):
+    host = remote['host']
+    if ':' in host and not host.startswith('['):
+        host = '[' + host + ']'
+    with urllib.request.urlopen(f"http://{host}:{remote['port']}{path}", timeout=timeout) as response:
+        return json.load(response)
+
+
+def remotes_payload(con, path=REMOTES_FILE):
+    row = con.execute("SELECT value FROM meta WHERE key='remotes'").fetchone()
+    statuses = {(s['host'], s['port']): s for s in (json.loads(row[0]) if row else [])}
+    return {'remotes': [{**remote, 'status': statuses.get((remote['host'], remote['port']))}
+                        for remote in load_remotes(path)]}
 
 
 def excluded_words(path=EXCLUDE_FILE):
@@ -70,7 +132,56 @@ def connect(path):
     return con
 
 
-def rebuild(path, home=None):
+def insert_turn(con, agent, session, model, timestamp, text, output, source, terms=(), searchable=True):
+    output_text = '\n'.join(part['text'] for part in output) if isinstance(output, list) else output
+    search_text = text + '\n' + output_text
+    stored = json.dumps(output, ensure_ascii=False) if isinstance(output, list) else output
+    row = con.execute('INSERT INTO turns(agent,session,model,day,timestamp,input,output,source,search_text) VALUES(?,?,?,?,?,?,?,?,?)',
+                      (agent, session, model, timestamp[:10], timestamp, text, stored, source, search_text))
+    if searchable:
+        con.execute('INSERT INTO search(rowid,text) VALUES(?,?)', (row.lastrowid, search_text))
+    if terms:
+        con.executemany('INSERT INTO terms VALUES(?,?,?)', [(term, row.lastrowid, count) for term, count in terms])
+    return row.lastrowid
+
+
+def import_remote(con, remote, grouped, warnings, fetch=fetch_remote):
+    label = f"{remote['host']}:{remote['port']}"
+    status = {'host': remote['host'], 'port': remote['port'],
+              'sections': {key: bool(remote.get(key)) for key in ('usage', 'search', 'words')},
+              'updated': None, 'usage': 0, 'turns': 0, 'terms': 0, 'error': None}
+    try:
+        if remote.get('usage'):
+            page = fetch(remote, '/api/export?section=usage')
+            status['updated'] = (page.get('meta') or {}).get('updated')
+            for row in page.get('usage', []):
+                values = grouped[(row['day'], row['agent'], row['model'])]
+                for index, key in enumerate(FIELDS):
+                    values[index] += row[key]
+                status['usage'] += 1
+        if remote.get('search') or remote.get('words'):
+            cursor = 0
+            while True:
+                page = fetch(remote, f'/api/export?section=turns&limit=50&cursor={cursor}')
+                if page.get('meta'):
+                    status['updated'] = page['meta'].get('updated')
+                for turn in page.get('turns', []):
+                    terms = [(t['term'], t['count']) for t in turn.get('terms', [])] if remote.get('words') else []
+                    insert_turn(con, turn['agent'], turn['session'], turn['model'], turn['timestamp'],
+                                turn['input'], turn['output'], label + ' · ' + (turn.get('source') or ''),
+                                terms, True)
+                    status['turns'] += 1
+                    status['terms'] += len(terms)
+                cursor = page.get('cursor')
+                if not cursor:
+                    break
+    except Exception as error:
+        status['error'] = f'{type(error).__name__}: {error}'
+        warnings.append(f'远端 {label} 汇入失败：{error}')
+    return status
+
+
+def rebuild(path, home=None, remotes=(), fetch=fetch_remote):
     import jieba
     jieba.setLogLevel(40)
     data = collect(home)
@@ -94,22 +205,19 @@ def rebuild(path, home=None):
             values = grouped[(u['day'], u['agent'], u['model'])]
             for i, key in enumerate(FIELDS):
                 values[i] += u[key]
-        con.executemany('INSERT INTO usage VALUES(?,?,?,?,?,?,?,?)', [(*key, *values) for key, values in grouped.items()])
         seen = set()
         for t in data.turns:
             identity = (t['agent'], t['session'], t['key'])
             if identity in seen:
                 continue
             seen.add(identity)
-            output_text = '\n'.join(p['text'] for p in t['output'])
-            search_text = t['input'] + '\n' + output_text
-            row = con.execute('INSERT INTO turns(agent,session,model,day,timestamp,input,output,source,search_text) VALUES(?,?,?,?,?,?,?,?,?)',
-                              (t['agent'], t['session'], t['model'], t['timestamp'][:10], t['timestamp'], t['input'], json.dumps(t['output'], ensure_ascii=False), t['source'], search_text))
-            tid = row.lastrowid
-            con.execute('INSERT INTO search(rowid,text) VALUES(?,?)', (tid, search_text))
-            if t.get('words', True):
-                con.executemany('INSERT INTO terms VALUES(?,?,?)', [(term, tid, count) for term, count in Counter(tokenize(t['input'])).items()])
-        meta = dict(updated=datetime.now().astimezone().isoformat(), warnings=data.warnings, sources=dict(data.sources), agents=TOOLS)
+            terms = list(Counter(tokenize(t['input'])).items()) if t.get('words', True) else []
+            insert_turn(con, t['agent'], t['session'], t['model'], t['timestamp'], t['input'], t['output'], t['source'], terms)
+        warnings = list(data.warnings)
+        statuses = [import_remote(con, remote, grouped, warnings, fetch) for remote in remotes]
+        con.executemany('INSERT INTO usage VALUES(?,?,?,?,?,?,?,?)', [(*key, *values) for key, values in grouped.items()])
+        meta = dict(updated=datetime.now().astimezone().isoformat(), warnings=warnings,
+                    sources=dict(data.sources), agents=TOOLS, remotes=statuses)
         con.executemany('INSERT INTO meta VALUES(?,?)', [(k, json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
         con.commit()
     except BaseException:
@@ -170,6 +278,12 @@ def positive(params, key, default, maximum):
     return value
 
 
+def index_meta(con):
+    keys = ('updated', 'sources', 'warnings')
+    rows = con.execute("SELECT * FROM meta WHERE key IN (?,?,?)", keys)
+    return {r['key']: json.loads(r['value']) for r in rows}
+
+
 def query(con, endpoint, p, exclude=(), writable=True):
     if endpoint == '/api/meta':
         result = {r['key']: json.loads(r['value']) for r in con.execute('SELECT * FROM meta')}
@@ -178,6 +292,31 @@ def query(con, endpoint, p, exclude=(), writable=True):
                       models=[r[0] for r in con.execute('SELECT DISTINCT model FROM usage ORDER BY model')],
                       writable=writable)
         return result
+    if endpoint == '/api/export':
+        section = p.get('section', 'usage')
+        if section == 'usage':
+            return dict(meta=index_meta(con), usage=[dict(r) for r in con.execute(
+                'SELECT day,agent,model,new,cc,cr,out,msgs FROM usage ORDER BY day,agent,model')])
+        if section == 'turns':
+            try:
+                cursor = int(p.get('cursor', 0) or 0)
+            except ValueError:
+                raise ValueError('cursor 须为整数')
+            limit = positive(p, 'limit', 100, 500)
+            rows = [dict(r) for r in con.execute(
+                'SELECT id,agent,session,model,timestamp,input,output,source FROM turns WHERE id>? ORDER BY id LIMIT ?',
+                (cursor, limit + 1))]
+            more = len(rows) > limit
+            rows = rows[:limit]
+            for row in rows:
+                row['output'] = json.loads(row['output'])
+                row['terms'] = [dict(r) for r in con.execute(
+                    'SELECT term,count FROM terms WHERE turn_id=? ORDER BY term', (row['id'],))]
+            result = dict(turns=rows, cursor=rows[-1]['id'] if more else None)
+            if not cursor:
+                result['meta'] = index_meta(con)
+            return result
+        raise ValueError('section 须为 usage 或 turns')
     if endpoint == '/api/usage':
         unit = p.get('unit', 'day')
         start, end, buckets = period(unit, positive(p, 'n', 14, 366))
@@ -286,6 +425,8 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path.startswith('/api/'):
                 p = {k: v[-1] for k, v in parse_qs(parsed.query).items()}
                 with closing(connect(self.server.db)) as con:
+                    if parsed.path == '/api/remotes':
+                        return self.respond(200, remotes_payload(con))
                     result = query(con, parsed.path, p, excluded_words(), self.is_local())
                 return self.respond(200, result)
             assets = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css'), '/favicon.ico': ('favicon.ico', 'image/x-icon')}
@@ -313,12 +454,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(400, {'error': str(error)})
             except OSError as error:
                 return self.respond(500, {'error': f'排除词保存失败：{error}'})
+        if self.path == '/api/remotes':
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                payload = json.loads(self.rfile.read(length) or b'{}')
+                return self.respond(200, {'ok': True, 'remotes': save_remotes(payload.get('remotes'))})
+            except ValueError as error:
+                return self.respond(400, {'error': str(error)})
+            except OSError as error:
+                return self.respond(500, {'error': f'远端配置保存失败：{error}'})
         if self.path != '/api/refresh':
             return self.respond(404, {'error': '未知接口'})
         if not self.server.refresh_lock.acquire(blocking=False):
             return self.respond(409, {'error': '正在刷新索引，请稍候'})
         try:
-            rebuild(self.server.db, self.server.home)
+            rebuild(self.server.db, self.server.home, load_remotes())
             self.respond(200, {'ok': True})
         except Exception as error:
             self.respond(500, {'error': f'刷新失败，保留旧索引：{error}'})
@@ -344,7 +494,7 @@ def main():
     path = directory / f'index{suffix}.sqlite'
     if args.reindex or args.home or not path.exists():
         print('正在读取本机会话并构建索引…', flush=True)
-        rebuild(path, args.home)
+        rebuild(path, args.home, load_remotes())
     if args.reindex:
         print('索引完成。')
         return

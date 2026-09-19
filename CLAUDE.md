@@ -11,6 +11,7 @@
 - `static/` — 前端：index.html、app.js、style.css
 - `tests/test_contracts.py` — 契约测试
 - `README.md` — 用法、数据来源与口径（解析与聚合逻辑的规格）、验证
+- `remotes.json` — 远端汇入配置（运行时生成，不入库）
 - `.stats/` — 派生索引与服务 PID/日志，可删，下次启动自动重建
 
 <important if="you need to run commands to install, start, or verify">
@@ -42,6 +43,12 @@
 <important if="you are modifying the network layer of stats_server.py (binding, headers, routing)">
 - 默认仅监听 127.0.0.1；开放监听与远端 Host 须经 `--allow-host` 放行名单（默认含 100.64.216.70），Host/Origin 校验始终生效（tests 已固定）。
 - 写操作（POST）仅限本机：客户端地址、Host 与代理转发头均须为回环。
+</important>
+
+<important if="you are modifying remote import (remotes.json, /api/export, import_remote)">
+- 汇入由本地服务主动 GET 远端 `/api/export` 并写入本地索引；远端不可达时重建必须继续，只在 warnings 与 meta.remotes 标记失败。
+- `remotes.json` 是本地个人配置（gitignore）；POST /api/remotes 与其它写操作一样仅限本机。
+- 勾选 words 隐含 search：词频轮次必须可搜索、可打开。
 </important>
 
 <important if="you are reading or writing agent logs or the index">
