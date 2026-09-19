@@ -7,10 +7,11 @@
 - `stats_server.py` — HTTP 服务，默认 127.0.0.1:18763；建索引与查询
 - `stats_data.py` — 日志解析、去重与聚合（五类 agent 日志）
 - `stats-today.py` — CLI，直接读日志，不依赖索引
+- `server.sh` — 服务控制：start / stop / restart / status，PID 与日志存于 .stats/
 - `static/` — 前端：index.html、app.js、style.css
 - `tests/test_contracts.py` — 契约测试
 - `README.md` — 用法、数据来源与口径（解析与聚合逻辑的规格）、验证
-- `.stats/` — 派生索引，可删，下次启动自动重建
+- `.stats/` — 派生索引与服务 PID/日志，可删，下次启动自动重建
 
 <important if="you need to run commands to install, start, or verify">
 
@@ -18,6 +19,7 @@
 |---|---|
 | `uv sync` | 安装依赖到 .venv |
 | `.venv/bin/python stats_server.py` | 启动服务（端口 18763） |
+| `./server.sh start \| stop \| restart \| status` | 服务控制（后台运行，日志 .stats/server.log） |
 | `.venv/bin/python stats_server.py --reindex` | 重建索引后退出 |
 | `.venv/bin/python stats-today.py [--week \| --days N]` | CLI 统计 |
 | `.venv/bin/python -m unittest discover -s tests -v` | 运行测试 |
