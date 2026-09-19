@@ -10,7 +10,7 @@
 | 4 | 重建：FTS 批量 rebuild | P2 | | 同上 |
 | 5 | 去掉 turns.search_text 重复列（schema v4） | P2 | | 同上 |
 | 6 | 小项：dsh 流式解压等 | P3 | | 同上 |
-| 7 | 用量柱状图双击跳转会话搜索并填参数 | P2 | | [usage-drilldown.md](docs/tasks/usage-drilldown.md) |
+| 7 | 用量柱状图双击跳转会话搜索并填参数 | P2 | ✅ | [usage-drilldown.md](docs/tasks/usage-drilldown.md)：CDP 冒烟全过 |
 | 8 | 每 30 分钟自动检查本机索引（watch_index，不自动同步远端） | — | ✅ | 7ee378c |
 | 9 | dsh 第六类 agent：zstd 解压、用量口径、注入消息归入「上下文」 | — | ✅ | 8c21808 |
 | 10 | 远端数据独立存放 + cursor/指纹增量同步 + 启停不删数据 | — | ✅ | 0f4b287、ead14c5 |

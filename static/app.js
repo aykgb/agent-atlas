@@ -115,6 +115,31 @@ async function metadata() {
   $('warningList').textContent = data.warnings.length ? data.warnings.join('\n') : '各数据源读取完成，无解析异常。';
   if (data.warnings.length) $('warnings').querySelector('summary').textContent = '数据口径与读取提示（' + data.warnings.length + '）';
 }
+const dateValue = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+function bucketRange(bucket, unit) {
+  if (unit === 'week') {
+    const [y, m, d] = bucket.split('-').map(Number);
+    return [bucket, dateValue(new Date(y, m - 1, d + 6))];
+  }
+  if (unit === 'month') {
+    const [y, m] = bucket.split('-').map(Number);
+    return [bucket + '-01', dateValue(new Date(y, m, 0))];
+  }
+  return [bucket, bucket];
+}
+function drilldown(bucket, key, group) {
+  const [start, end] = bucketRange(bucket, $('unit').value);
+  $('start').value = start; $('end').value = end;
+  $('agent').value = ''; $('model').value = '';
+  if (key !== '其他' && group === 'agent') $('agent').value = key;
+  if (key !== '其他' && group === 'model') $('model').value = key;
+  if (key !== '其他' && group === 'pair') {
+    const [agent, ...rest] = key.split(' / ');
+    $('agent').value = agent; $('model').value = rest.join(' / ');
+  }
+  $('q').value = ''; state.term = ''; state.page = 1;
+  setTab('search');
+}
 function renderUsage(data) {
   state.usage = data;
   const sum = key => data.rows.reduce((s, r) => s + r[key], 0);
@@ -172,7 +197,7 @@ function renderCharts() {
       y-=h;
       const label=g.bucket+' · '+key+' · '+number(value)+' tokens';
       const detail=esc(g.bucket)+' · '+esc(key)+'<br>'+number(value)+' tokens · 占该周期 '+(value/bucketTotal*100).toFixed(1)+'%';
-      svg += '<rect tabindex="0" aria-label="'+esc(label)+'" data-tip="'+detail+'" x="'+(left+stride*i+(stride-bar)/2)+'" y="'+y+'" width="'+bar+'" height="'+h+'" fill="'+colors[j]+'"></rect>';
+      svg += '<rect tabindex="0" aria-label="'+esc(label)+'" data-tip="'+detail+'" data-bucket="'+esc(g.bucket)+'" data-key="'+esc(key)+'" data-group="'+esc(grouping)+'" x="'+(left+stride*i+(stride-bar)/2)+'" y="'+y+'" width="'+bar+'" height="'+h+'" fill="'+colors[j]+'"></rect>';
     });
     svg += '<text x="'+(left+stride*(i+.5))+'" y="251" text-anchor="middle">'+esc(g.bucket.length===7 ? g.bucket.slice(2) : g.bucket.slice(5))+'</text>';
   });
@@ -280,6 +305,10 @@ function setTab(tab) {
 document.querySelectorAll('nav button').forEach(b=>b.addEventListener('click',()=>setTab(b.dataset.tab)));
 for(const id of ['agent','model','n','unit','start','end','wordLimit','minLen','maxLen']) $(id).addEventListener('change',()=>{state.page=1;load();});
 $('group').addEventListener('change',renderCharts);
+$('bars').addEventListener('dblclick',event=>{
+  const rect=event.target.closest('rect');
+  if(rect) drilldown(rect.dataset.bucket,rect.dataset.key,rect.dataset.group);
+});
 $('searchForm').addEventListener('submit',e=>{e.preventDefault();state.page=1;state.term='';load();});
 $('prev').addEventListener('click',()=>{state.page--;load();});
 $('next').addEventListener('click',()=>{state.page++;load();});
