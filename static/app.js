@@ -140,10 +140,22 @@ function drilldown(bucket, key, group) {
   $('q').value = ''; state.term = ''; state.page = 1;
   setTab('search');
 }
+function renderRanking(id, entries, total) {
+  if (!entries.length) { $(id).innerHTML = empty('这个时间范围还没有用量'); return; }
+  const maximum = Math.max(...entries.map(([, value]) => value), 1);
+  $(id).innerHTML = entries.map(([name, value], index) => {
+    const share = (value / total * 100).toFixed(1);
+    return '<div class="rank-row" title="' + esc(name) + ' · ' + number(value) + ' tokens · 占总量 ' + share + '%">' +
+      '<span class="rank-index">' + (index + 1) + '</span><span class="rank-name">' + esc(name) + '</span>' +
+      '<div class="rank-track"><div class="rank-fill" style="width:' + (value / maximum * 100).toFixed(1) + '%"></div></div>' +
+      '<span class="rank-value">' + compact(value) + ' · ' + share + '%</span></div>';
+  }).join('');
+}
 function renderUsage(data) {
   state.usage = data;
   const sum = key => data.rows.reduce((s, r) => s + r[key], 0);
-  for (const [id, value] of [['total',sum('total')],['input',sum('new')],['cache',sum('cc')+sum('cr')],['output',sum('out')]]) {
+  const total = sum('total');
+  for (const [id, value] of [['total',total],['input',sum('new')],['cache',sum('cc')+sum('cr')],['output',sum('out')]]) {
     $(id).textContent = compact(value); $(id).title = number(value) + ' tokens';
   }
   $('range').textContent = data.start + ' — ' + data.end;
@@ -155,6 +167,13 @@ function renderUsage(data) {
     for (const field of ['new','cc','cr','out','msgs','total']) rows.get(key)[field] += row[field];
   }
   $('usageRows').innerHTML = [...rows.values()].sort((a,b) => b.total-a.total).map(r => '<tr><td><b>' + esc(r.model) + '</b><small>' + esc(r.agent) + '</small></td>' + ['msgs','new','cc','cr','out','total'].map(k => '<td>' + number(r[k]) + '</td>').join('') + '</tr>').join('') || '<tr><td colspan="7">当前范围没有用量记录，请调整时间或筛选。</td></tr>';
+  const rank = field => {
+    const totals = new Map();
+    for (const r of rows.values()) totals.set(r[field], (totals.get(r[field]) || 0) + r.total);
+    return [...totals.entries()].filter(([, value]) => value > 0).sort((a,b) => b[1]-a[1] || a[0].localeCompare(b[0]));
+  };
+  renderRanking('agentRank', rank('agent'), total);
+  renderRanking('modelRank', rank('model'), total);
   renderCharts();
 }
 function renderCharts() {

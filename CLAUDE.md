@@ -21,7 +21,7 @@
 <important if="you need to run commands to install, start, or verify">
 
 | 命令 | 用途 |
-|---|---|
+| --- | --- |
 | `uv sync` | 安装依赖到 .venv |
 | `.venv/bin/python stats_server.py` | 启动服务（端口 18763） |
 | `./server.sh start \| stop \| restart \| status` | 服务控制（后台运行，日志 .stats/server.log） |
@@ -30,6 +30,7 @@
 | `.venv/bin/python stats-today.py [--week \| --days N]` | CLI 统计 |
 | `.venv/bin/python -m unittest discover -s tests -v` | 运行测试 |
 | `node --check static/app.js` | 前端语法检查 |
+
 </important>
 
 <important if="you are adding a feature or changing behavior">
