@@ -12,7 +12,15 @@ uv sync
 .venv/bin/python stats_server.py
 ```
 
-打开 <http://127.0.0.1:18763>。只监听本机；Ctrl+C 停止。端口被占用时使用 `--port 18764`。
+打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止。端口被占用时使用 `--port 18764`。
+
+远端经反向代理访问时，用 `--host` 指定监听地址（`0.0.0.0`、局域网或 Tailscale 的 IP），用 `--allow-host` 放行访问用的域名或 IP（可重复；默认已放行 Tailscale 地址 `100.64.216.70`）：
+
+```sh
+.venv/bin/python stats_server.py --host 0.0.0.0 --allow-host stats.example.com
+```
+
+Host 与 Origin 始终校验，只接受回环地址和放行名单。GET 查询对放行的远端开放；重建索引、编辑排除词仅限本机直连，远端页面会隐藏这些操作。服务本身不带鉴权且远端可见全部会话原文，访问控制交给 Tailscale、内网或反向代理；代理需透传原始 Host 与 X-Forwarded-For / X-Real-IP，否则远端请求会被误判为本机。
 
 首次启动建立索引，之后复用本地索引。右上角显示更新时间；点击「刷新数据」重建，完成前仍可查询旧索引。也可执行 `.venv/bin/python stats_server.py --reindex`。
 
@@ -64,4 +72,4 @@ Claude 同一消息的流式 usage 取各字段最大值，只计一次调用；
 node --check static/app.js
 ```
 
-测试覆盖五类日志的归属与去重、思考计量、输入输出配对、中文搜索、词频范围、日历边界，以及 HTTP 的 Host / Origin 访问边界。
+测试覆盖五类日志的归属与去重、思考计量、输入输出配对、中文搜索、词频范围、日历边界，以及 HTTP 的 Host / Origin 白名单与远端只读边界。

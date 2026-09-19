@@ -38,7 +38,8 @@
 </important>
 
 <important if="you are modifying the network layer of stats_server.py (binding, headers, routing)">
-- 服务只服务本机：保持 127.0.0.1 绑定与 Host/Origin 校验（tests 已固定）。
+- 默认仅监听 127.0.0.1；开放监听与远端 Host 须经 `--allow-host` 放行名单（默认含 100.64.216.70），Host/Origin 校验始终生效（tests 已固定）。
+- 写操作（POST）仅限本机：客户端地址、Host 与代理转发头均须为回环。
 </important>
 
 <important if="you are reading or writing agent logs or the index">

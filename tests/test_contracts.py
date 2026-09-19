@@ -6,10 +6,19 @@ from datetime import date
 from pathlib import Path
 
 from stats_data import Dataset, collect, usage_values
-from stats_server import Handler, connect, excluded_words, period, query, rebuild, save_excluded
+from stats_server import LOOPBACK, Handler, allowed_hosts, connect, excluded_words, period, query, rebuild, save_excluded
 
 
 TS = '2026-09-18T12:00:00+08:00'
+
+
+def fake_handler(host, origin=None, names=None, client='127.0.0.1', forwarded=None):
+    handler = object.__new__(Handler)
+    handler.server = type('Server', (), {'server_port': 18763, 'allowed_names': set(names or allowed_hosts())})()
+    handler.headers = {key: value for key, value in
+                       {'Host': host, 'Origin': origin, 'X-Forwarded-For': forwarded}.items() if value is not None}
+    handler.client_address = (client, 51000)
+    return handler
 
 
 class Contracts(unittest.TestCase):
@@ -252,15 +261,40 @@ class Contracts(unittest.TestCase):
         self.assertEqual(len(period('day',14,today)[2]),14)
 
     def test_http_security_rejects_foreign_hosts_and_origins(self):
-        handler=object.__new__(Handler)
-        handler.server=type('Server',(),{'server_port':18763})()
-        for headers,allowed in [
-            ({'Host':'127.0.0.1:18763'},True),
-            ({'Host':'evil.example'},False),
-            ({'Host':'127.0.0.1:18763','Origin':'https://evil.example'},False),
-        ]:
-            handler.headers=headers
-            self.assertEqual(handler.allowed(),allowed)
+        self.assertTrue(fake_handler('127.0.0.1:18763').allowed())
+        self.assertTrue(fake_handler('localhost:18763').allowed())
+        self.assertFalse(fake_handler('evil.example').allowed())
+        self.assertFalse(fake_handler('127.0.0.1:18763',origin='https://evil.example').allowed())
+
+    def test_allow_host_admits_proxy_names_and_bind_address(self):
+        names=allowed_hosts('127.0.0.1',['stats.example.com','192.168.1.5:8443'])
+        self.assertEqual(names,set(LOOPBACK)|{'100.64.216.70','stats.example.com','192.168.1.5'})
+        self.assertTrue(fake_handler('stats.example.com',names=names).allowed())
+        self.assertTrue(fake_handler('stats.example.com:443',origin='https://stats.example.com',names=names).allowed())
+        self.assertFalse(fake_handler('evil.example',names=names).allowed())
+        self.assertFalse(fake_handler('stats.example.com',origin='https://evil.example',names=names).allowed())
+        self.assertTrue(fake_handler('100.64.216.70:18763').allowed())
+        self.assertIn('100.64.216.70',allowed_hosts())
+        self.assertIn('192.168.1.5',allowed_hosts('192.168.1.5'))
+        self.assertNotIn('0.0.0.0',allowed_hosts('0.0.0.0'))
+
+    def test_writes_require_direct_loopback_client(self):
+        self.assertTrue(fake_handler('127.0.0.1:18763').is_local())
+        self.assertFalse(fake_handler('stats.example.com',names=allowed_hosts('127.0.0.1',['stats.example.com'])).is_local())
+        self.assertFalse(fake_handler('127.0.0.1:18763',client='192.168.1.9').is_local())
+        self.assertFalse(fake_handler('127.0.0.1:18763',forwarded='203.0.113.5').is_local())
+        self.assertTrue(fake_handler('127.0.0.1:18763',forwarded='127.0.0.1').is_local())
+
+    def test_meta_reports_writable_for_local_clients_only(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u',message=dict(role='user',content='概览')),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertTrue(query(con,'/api/meta',{})['writable'])
+        self.assertFalse(query(con,'/api/meta',{},writable=False)['writable'])
 
 
 if __name__=='__main__':

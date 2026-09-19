@@ -19,6 +19,19 @@ from stats_data import FIELDS, TOOLS, collect
 ROOT = Path(__file__).resolve().parent
 EXCLUDE_FILE = ROOT / 'words-exclude.txt'
 STOP = set('的 了 和 是 在 我 你 他 她 它 这 那 一个 一些 我们 你们 他们 可以 需要 使用 进行 以及 并且 如果 然后 这个 那个 不 有 就 都 也 到 与 为 对 中 将 请 把 被 要 吗 呢 啊 the a an and or is are to of in for on with this that it be as at by from you your i we'.split())
+LOOPBACK = frozenset({'127.0.0.1', 'localhost', '::1'})
+DEFAULT_ALLOWED = ('100.64.216.70',)
+
+
+def allowed_hosts(bind='127.0.0.1', extra=()):
+    names = set(LOOPBACK) | set(DEFAULT_ALLOWED)
+    if bind not in ('0.0.0.0', '::'):
+        names.add(bind.casefold())
+    for entry in extra:
+        name = urlsplit('//' + entry.strip()).hostname
+        if name:
+            names.add(name)
+    return names
 
 
 def excluded_words(path=EXCLUDE_FILE):
@@ -157,12 +170,13 @@ def positive(params, key, default, maximum):
     return value
 
 
-def query(con, endpoint, p, exclude=()):
+def query(con, endpoint, p, exclude=(), writable=True):
     if endpoint == '/api/meta':
         result = {r['key']: json.loads(r['value']) for r in con.execute('SELECT * FROM meta')}
         result.update(turns=con.execute('SELECT count(*) FROM turns').fetchone()[0],
                       sessions=con.execute('SELECT count(*) FROM (SELECT DISTINCT agent,session FROM turns)').fetchone()[0],
-                      models=[r[0] for r in con.execute('SELECT DISTINCT model FROM usage ORDER BY model')])
+                      models=[r[0] for r in con.execute('SELECT DISTINCT model FROM usage ORDER BY model')],
+                      writable=writable)
         return result
     if endpoint == '/api/usage':
         unit = p.get('unit', 'day')
@@ -230,6 +244,7 @@ def query(con, endpoint, p, exclude=()):
 
 class Server(ThreadingHTTPServer):
     daemon_threads = True
+    allowed_names = LOOPBACK
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -245,21 +260,33 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def hostname(self):
+        return urlsplit('//' + self.headers.get('Host', '')).hostname or ''
+
     def allowed(self):
-        host = self.headers.get('Host', '')
+        if self.hostname() not in self.server.allowed_names:
+            return False
         origin = self.headers.get('Origin')
-        expected = f'127.0.0.1:{self.server.server_port}'
-        return host in (expected, f'localhost:{self.server.server_port}') and (not origin or origin in ('http://' + expected, f'http://localhost:{self.server.server_port}'))
+        if not origin:
+            return True
+        parsed = urlsplit(origin)
+        return parsed.scheme in ('http', 'https') and parsed.hostname in self.server.allowed_names
+
+    def is_local(self):
+        if self.hostname() not in LOOPBACK or self.client_address[0] not in LOOPBACK:
+            return False
+        hops = (self.headers.get('X-Forwarded-For', '') + ',' + self.headers.get('X-Real-IP', '')).split(',')
+        return all(not hop.strip() or hop.strip() in LOOPBACK for hop in hops)
 
     def do_GET(self):
         if not self.allowed():
-            return self.respond(403, {'error': '仅允许本机同源访问'})
+            return self.respond(403, {'error': 'Host 或来源不在允许列表'})
         parsed = urlsplit(self.path)
         try:
             if parsed.path.startswith('/api/'):
                 p = {k: v[-1] for k, v in parse_qs(parsed.query).items()}
                 with closing(connect(self.server.db)) as con:
-                    result = query(con, parsed.path, p, excluded_words())
+                    result = query(con, parsed.path, p, excluded_words(), self.is_local())
                 return self.respond(200, result)
             assets = {'/': ('index.html', 'text/html'), '/app.js': ('app.js', 'text/javascript'), '/style.css': ('style.css', 'text/css'), '/favicon.ico': ('favicon.ico', 'image/x-icon')}
             if parsed.path not in assets:
@@ -272,7 +299,7 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(500, {'error': f'索引不可用：{error}'})
 
     def do_POST(self):
-        if not self.allowed() or self.headers.get('X-Stats-Request') != '1':
+        if not self.allowed() or not self.is_local() or self.headers.get('X-Stats-Request') != '1':
             return self.respond(403, {'error': '仅允许本机同源操作'})
         if self.path == '/api/words-exclude':
             try:
@@ -305,6 +332,9 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port', type=int, default=18763)
+    parser.add_argument('--host', default='127.0.0.1', help='监听地址，默认仅本机')
+    parser.add_argument('--allow-host', action='append', default=[], metavar='HOST',
+                        help=f'额外放行的访问域名或 IP（可重复；默认已放行 {"、".join(DEFAULT_ALLOWED)}）')
     parser.add_argument('--home', help='日志所在的用户目录')
     parser.add_argument('--reindex', action='store_true', help='重建索引后退出')
     args = parser.parse_args()
@@ -318,9 +348,14 @@ def main():
     if args.reindex:
         print('索引完成。')
         return
-    server = Server(('127.0.0.1', args.port), Handler)
+    server = Server((args.host, args.port), Handler)
     server.db, server.home, server.refresh_lock = path, args.home, threading.Lock()
-    print(f'打开 http://127.0.0.1:{args.port} · Ctrl+C 停止', flush=True)
+    server.allowed_names = allowed_hosts(args.host, args.allow_host)
+    address = args.host if args.host not in ('0.0.0.0', '::') else '127.0.0.1'
+    if ':' in address:
+        address = '[' + address + ']'
+    print(f'打开 http://{address}:{args.port} · Ctrl+C 停止', flush=True)
+    print('远端放行 Host：' + '、'.join(sorted(server.allowed_names - LOOPBACK)), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
