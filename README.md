@@ -12,7 +12,7 @@ uv sync
 .venv/bin/python stats_server.py
 ```
 
-打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止，或用 `./server.sh start | stop | restart | status` 后台运行（Windows 用 `server.ps1`，命令相同；PID 与日志都在 `.stats/`）。端口被占用时使用 `--port 18764`。
+打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止，或用 `./server.sh start | stop | restart | status` 后台运行（Windows 用 `server.ps1`，命令相同；PID 与日志都在 `.stats/`）。端口被占用时使用 `--port 18764`。索引构建期间服务 HTTP 尚未监听，start/status 会阻塞到就绪才返回。
 
 远端经反向代理访问时，用 `--host` 指定监听地址（`0.0.0.0`、局域网或 Tailscale 的 IP），用 `--allow-host` 放行访问用的域名或 IP（可重复；默认已放行 Tailscale 地址 `100.64.216.70`）：
 

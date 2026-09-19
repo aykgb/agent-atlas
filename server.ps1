@@ -1,5 +1,6 @@
 ﻿# 控制 stats_server.py：.\server.ps1 {start|stop|restart|status} [服务参数，如 --port 18764]
 # 须经本脚本启动，stop/restart 才能定位进程；PID 与日志存于 .stats/（派生数据，可删）。
+# start/status 在服务未就绪（索引构建中，HTTP 尚未监听）时阻塞到就绪。
 param(
   [Parameter(Position = 0)] [string]$Command,
   [Parameter(ValueFromRemainingArguments = $true)] [string[]]$ServerArgs
@@ -98,6 +99,24 @@ function Get-ServerMeta {
   return $null
 }
 
+# 阻塞直到 /api/meta 就绪（索引构建期间 HTTP 尚未监听）；等待期间进程退出则按启动失败处理
+function Wait-ServerReady {
+  param([string]$Url)
+  $notified = $false
+  while (-not (Get-ServerMeta -Url $Url)) {
+    if (-not $notified) {
+      Write-Output '索引构建中，等待就绪…'
+      $notified = $true
+    }
+    if (-not (Get-ServerPid)) {
+      Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+      Write-StartupFailure
+      exit 1
+    }
+    Start-Sleep -Seconds 1
+  }
+}
+
 function Start-Server {
   param([string[]]$ServerArgs = @())
   $existing = Get-ServerPid
@@ -113,7 +132,10 @@ function Start-Server {
     # 地址从运行中进程的实际命令行解析，避免与本次传入的参数不一致
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $existing" -ErrorAction SilentlyContinue
     $tokens = if ($proc) { @($proc.CommandLine -split '\s+') } else { @($ServerArgs) }
-    Write-Ok "已在运行 (PID $existing)，打开 $(Get-ServerUrl -Tokens $tokens)"
+    $url = Get-ServerUrl -Tokens $tokens
+    Write-Ok "已在运行 (PID $existing)，打开 $url"
+    Wait-ServerReady -Url $url
+    Write-Ok '状态: 运行中'
     return
   }
   if (-not (Test-Path -LiteralPath $Python)) {
@@ -174,8 +196,8 @@ function Start-Server {
     $url = Get-ServerUrl -Tokens $ServerArgs
     Write-Ok "已启动 (PID $($serverProc.ProcessId))"
     Write-Output "打开 $url"
-    if (Get-ServerMeta -Url $url) { Write-Ok '状态: 运行中' }
-    else { Write-Ok '状态: 运行中（索引构建中，尚未就绪）' }
+    Wait-ServerReady -Url $url
+    Write-Ok '状态: 运行中'
     Write-Output "日志: $OutLog / $ErrLog"
   }
   else {
@@ -234,15 +256,14 @@ function Show-ServerStatus {
   Write-Ok "运行中 (PID $procId)"
   Write-Output "打开 $url"
   $meta = Get-ServerMeta -Url $url
-  if ($meta) {
-    # ConvertFrom-Json 已把 ISO 时间戳转成 DateTime，两种形态都兼容
-    $updated = $meta.updated
-    if ($updated -is [string]) { $updated = [DateTime]::Parse($updated) }
-    Write-Ok "响应正常（索引更新于 $($updated.ToString('yyyy-MM-dd HH:mm:ss'))，$($meta.turns) 轮）"
+  if (-not $meta) {
+    Wait-ServerReady -Url $url
+    $meta = Get-ServerMeta -Url $url
   }
-  else {
-    Write-Err '未响应（索引构建中）'
-  }
+  # ConvertFrom-Json 已把 ISO 时间戳转成 DateTime，两种形态都兼容
+  $updated = $meta.updated
+  if ($updated -is [string]) { $updated = [DateTime]::Parse($updated) }
+  Write-Ok "响应正常（索引更新于 $($updated.ToString('yyyy-MM-dd HH:mm:ss'))，$($meta.turns) 轮）"
   Write-Output "日志: $OutLog / $ErrLog"
 }
 

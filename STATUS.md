@@ -15,5 +15,6 @@
 | 9 | dsh 第六类 agent：zstd 解压、用量口径、注入消息归入「上下文」 | — | ✅ | 8c21808 |
 | 10 | 远端数据独立存放 + cursor/指纹增量同步 + 启停不删数据 | — | ✅ | 0f4b287、ead14c5 |
 | 11 | 刷新改增量（水位 + size）、远端面板每台独立启停 | — | ✅ | 0f4b287 |
+| 12 | 控制脚本未就绪则阻塞到就绪（server.sh / server.ps1） | P2 | ✅ | [server-wait-ready.md](docs/tasks/server-wait-ready.md) |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。
