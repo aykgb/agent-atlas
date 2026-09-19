@@ -322,11 +322,12 @@ class Contracts(unittest.TestCase):
         self.assertTrue(first['turns'][0]['terms'])
         fingerprint=first['turns'][0]['fingerprint']
         self.assertTrue(fingerprint)
+        con.close()
         rebuild(db,self.home)
         con2=connect(db)
         self.addCleanup(con2.close)
         self.assertEqual(query(con2,'/api/export',dict(section='turns',limit='1'))['turns'][0]['fingerprint'],fingerprint)
-        second=query(con,'/api/export',dict(section='turns',limit='1',cursor=str(first['cursor'])))
+        second=query(con2,'/api/export',dict(section='turns',limit='1',cursor=str(first['cursor'])))
         self.assertEqual(len(second['turns']),1)
         self.assertIsNone(second['cursor'])
         self.assertNotIn('meta',second)
@@ -359,13 +360,15 @@ class Contracts(unittest.TestCase):
         return self.write('.pi/agent/sessions/a.jsonl', rows, home=home)
 
     def remote_fetch(self, index):
-        remote_con = connect(index)
-        self.addCleanup(remote_con.close)
         calls = []
         def fetch(remote, path):
             calls.append(path)
             parsed = urlsplit(path)
-            return query(remote_con, parsed.path, {k: v[-1] for k, v in parse_qs(parsed.query).items()})
+            remote_con = connect(index)
+            try:
+                return query(remote_con, parsed.path, {k: v[-1] for k, v in parse_qs(parsed.query).items()})
+            finally:
+                remote_con.close()
         return fetch, calls
 
     def test_incremental_update_only_reindexes_changed_files(self):
