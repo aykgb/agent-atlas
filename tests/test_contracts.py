@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from datetime import date
 from pathlib import Path
 from unittest import mock
@@ -724,6 +725,63 @@ class Contracts(unittest.TestCase):
             query(con,'/api/session',dict(agent='pi',session='missing'))
         with self.assertRaises(ValueError):
             query(con,'/api/session',dict(agent='',session='a'))
+
+    def test_sessions_carry_token_totals_and_count_duplicates_once(self):
+        rows=[dict(type='message',id='u1',message=dict(role='user',content='TOKENWORD 甲')),
+              dict(type='message',id='a1',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],
+                                                       usage=dict(input=10,cacheWrite=4,cacheRead=6,output=3)))]
+        self.write('.pi/agent/sessions/a.jsonl',rows)
+        # 同一条用量出现在两个文件（历史分叉复制）：按 (agent,key) 只计一次，归给字典序最小的会话。
+        self.write('.pi/agent/sessions/a2.jsonl',rows)
+        self.write('.pi/agent/sessions/b.jsonl',[
+            dict(type='message',id='u2',message=dict(role='user',content='TOKENWORD 乙')),
+            dict(type='message',id='a2',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],
+                                                     usage=dict(input=1,output=2)))])
+        db=self.home/'tokens.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        totals={r['session']:r['total'] for r in query(con,'/api/sessions',{})['rows']}
+        self.assertEqual(totals,{'a':23,'a2':None,'b':3})
+        session_a=next(r for r in query(con,'/api/sessions',{})['rows'] if r['session']=='a')
+        self.assertEqual((session_a['new'],session_a['cc'],session_a['cr'],session_a['out'],session_a['msgs']),(10,4,6,3,1))
+        usage=query(con,'/api/usage',dict(start=TS[:10],end=TS[:10]))
+        self.assertEqual(sum(r['total'] for r in usage['rows']),26)
+
+    def test_session_totals_reach_remote_and_honor_usage_flag(self):
+        remote_home=self.home/'token-remote'
+        remote_home.mkdir()
+        self.remote_log(remote_home,[
+            dict(type='message',id='u',message=dict(role='user',content='REMOTE 用量')),
+            dict(type='message',id='a',message=dict(role='assistant',model='rm',content=[dict(type='text',text='答')],
+                                                    usage=dict(input=7,cacheRead=5,output=3)))])
+        remote_index=self.home/'token-remote.sqlite'
+        rebuild(remote_index,remote_home)
+        with closing(connect(remote_index)) as remote_con:
+            self.assertEqual(query(remote_con,'/api/export',dict(section='usage'))['sessions'][0]['new'],7)
+        fetch,_=self.remote_fetch(remote_index)
+        remote=dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'token-store'
+        directory.mkdir()
+        sync_remote(remote,directory,fetch)
+        local_home=self.home/'token-local'
+        local_home.mkdir()
+        self.remote_log(local_home,[dict(type='message',id='u',message=dict(role='user',content='LOCAL 用量'))])
+        local_index=self.home/'token-local.sqlite'
+        rebuild(local_index,local_home)
+        con=connect(local_index)
+        self.addCleanup(con.close)
+        config=self.home/'token-remotes.json'
+        save_remotes([remote],config)
+        sources=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(sources))
+        remote_row=next(r for r in query(con,'/api/sessions',{},sources=sources)['rows'] if r['key']!='local')
+        self.assertEqual(remote_row['total'],15)
+        save_remotes([dict(remote,usage=False)],config)
+        muted=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(muted))
+        quiet=next(r for r in query(con,'/api/sessions',{},sources=muted)['rows'] if r['key']!='local')
+        self.assertIsNone(quiet['total'])
 
     def test_session_detail_routes_remote_and_honors_search_flag(self):
         local_home=self.home/'session-local'

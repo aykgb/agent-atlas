@@ -280,16 +280,23 @@ function showSessionList() {
   $('sessionListView').hidden = false;
   $('sessionDetail').hidden = true;
 }
+function sessionTokens(s) {
+  if (s.total === null || s.total === undefined) return '<span class="session-tokens subtle">—</span>';
+  const detail = ['新增 '+number(s.new),'缓存写 '+number(s.cc),'缓存读 '+number(s.cr),'输出 '+number(s.out),'调用 '+number(s.msgs)].join('<br>');
+  return '<span class="session-tokens" data-tip="'+esc(detail)+'">'+esc(compact(s.total))+'</span>';
+}
 function renderSessions(data) {
   const rows = data.rows || [];
   $('sessionCount').textContent = number(data.total)+' 个会话 · 按创建时间倒序'+(data.total ? ' · 第 '+data.page+' / '+data.pages+' 页' : '');
   $('sessionList').innerHTML = rows.map((s,index) =>
     '<button class="session-row" data-index="'+index+'"><span class="badge">'+esc(s.agent)+'</span>'+
     '<span class="session-name">'+esc(s.session)+'</span><span class="subtle">'+number(s.turns)+' 轮</span>'+
+    sessionTokens(s)+
     '<span class="subtle">'+esc(s.label)+'</span><span class="session-date">'+esc(s.first ? new Date(s.first).toLocaleString('zh-CN') : '')+'</span></button>').join('')
     || empty('当前筛选下没有会话。');
   $('sessionList').querySelectorAll('.session-row').forEach(button =>
     button.addEventListener('click',()=>openSession(rows[+button.dataset.index])));
+  bindTips($('sessionList'));
   $('sessionPage').textContent = data.total ? data.page+' / '+data.pages : '0 / 0';
   $('sessionPrev').disabled = data.page <= 1; $('sessionNext').disabled = data.page >= data.pages;
 }

@@ -21,7 +21,7 @@ from stats_data import FIELDS, TOOLS, Dataset, discover, read_agent
 ROOT = Path(__file__).resolve().parent
 EXCLUDE_FILE = ROOT / 'words-exclude.txt'
 REMOTES_FILE = ROOT / 'remotes.json'
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 AUTO_REFRESH_SECONDS = 30 * 60
 AUTO_REFRESH_STEP_SECONDS = 60
 STOP = set('的 了 和 是 在 我 你 他 她 它 这 那 一个 一些 我们 你们 他们 可以 需要 使用 进行 以及 并且 如果 然后 这个 那个 不 有 就 都 也 到 与 为 对 中 将 请 把 被 要 吗 呢 啊 the a an and or is are to of in for on with this that it be as at by from you your i we'.split())
@@ -39,10 +39,14 @@ CREATE VIRTUAL TABLE search USING fts5(search_text,content='',contentless_delete
 CREATE TABLE terms(term TEXT,turn_id INTEGER,count INTEGER,PRIMARY KEY(term,turn_id));
 CREATE INDEX terms_turn ON terms(turn_id);
 CREATE TABLE files(path TEXT PRIMARY KEY,agent TEXT,size INTEGER,warnings TEXT);
-CREATE TABLE file_usage(path TEXT,agent TEXT,key TEXT,day TEXT,model TEXT,new INTEGER,cc INTEGER,cr INTEGER,out INTEGER,msgs INTEGER);
+CREATE TABLE file_usage(path TEXT,agent TEXT,key TEXT,day TEXT,model TEXT,session TEXT,new INTEGER,cc INTEGER,cr INTEGER,out INTEGER,msgs INTEGER);
 CREATE INDEX file_usage_filter ON file_usage(day,agent,model);
+CREATE TABLE session_usage(agent TEXT,session TEXT,new INTEGER,cc INTEGER,cr INTEGER,out INTEGER,msgs INTEGER,PRIMARY KEY(agent,session));
 CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT);
 """
+# 跨文件重复的用量按 (agent,key) 取各字段最大值；同一 key 改写过 session id 时归给字典序最小的那个。
+DEDUPED_USAGE = ("SELECT agent,key,day,model,MIN(session) AS session,MAX(new) AS new,MAX(cc) AS cc,"
+                 "MAX(cr) AS cr,MAX(out) AS out,MAX(msgs) AS msgs FROM file_usage GROUP BY agent,key,day,model")
 SEARCH_TEXT = ("input || char(10) || COALESCE((SELECT group_concat(json_extract(part.value,'$.text'),char(10))"
                " FROM json_each(turns.output) AS part), '')")
 
@@ -140,6 +144,8 @@ def remote_status(remote, directory):
             status['error'] = meta_value(con, 'sync_error') or None
     except sqlite3.Error as error:
         status['error'] = str(error)
+    if index_version(path) != SCHEMA_VERSION:
+        status['error'] = status['error'] or '索引格式已升级，请重新同步'
     return status
 
 
@@ -249,8 +255,9 @@ def store_dataset(con, source_path, data, searchable=True):
         terms = list(Counter(tokenize(t['input'])).items()) if t.get('words', True) else []
         insert_turn(con, t['agent'], t['session'], t['model'], t['timestamp'], t['input'], t['output'],
                     t['source'], terms, searchable, source_path, identity)
-    con.executemany('INSERT INTO file_usage VALUES(?,?,?,?,?,?,?,?,?,?)',
-                    [(source_path, u['agent'], u['key'], u['day'], u['model'], u['new'], u['cc'], u['cr'], u['out'], u['msgs'])
+    con.executemany('INSERT INTO file_usage VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    [(source_path, u['agent'], u['key'], u['day'], u['model'], u['session'],
+                      u['new'], u['cc'], u['cr'], u['out'], u['msgs'])
                      for u in data.usage])
 
 
@@ -272,13 +279,13 @@ def parse_into(con, agent, file, searchable=True):
 
 def refresh_usage(con):
     con.execute('DELETE FROM usage')
-    con.execute("""
-        INSERT INTO usage(day,agent,model,new,cc,cr,out,msgs)
-        SELECT day,agent,model,SUM(new),SUM(cc),SUM(cr),SUM(out),SUM(msgs) FROM (
-            SELECT agent,key,day,model,MAX(new) AS new,MAX(cc) AS cc,MAX(cr) AS cr,MAX(out) AS out,MAX(msgs) AS msgs
-            FROM file_usage GROUP BY agent,key,day,model)
-        GROUP BY day,agent,model
-    """)
+    con.execute('INSERT INTO usage(day,agent,model,new,cc,cr,out,msgs)'
+                ' SELECT day,agent,model,SUM(new),SUM(cc),SUM(cr),SUM(out),SUM(msgs) FROM ('
+                + DEDUPED_USAGE + ') GROUP BY day,agent,model')
+    con.execute('DELETE FROM session_usage')
+    con.execute('INSERT INTO session_usage(agent,session,new,cc,cr,out,msgs)'
+                ' SELECT agent,session,SUM(new),SUM(cc),SUM(cr),SUM(out),SUM(msgs) FROM ('
+                + DEDUPED_USAGE + ') GROUP BY agent,session')
 
 
 def write_meta(con, indexed_at):
@@ -396,7 +403,7 @@ def sync_remote(remote, directory, fetch=fetch_remote):
             require_contentless()
             con.executescript('DROP TABLE IF EXISTS usage; DROP TABLE IF EXISTS turns; DROP TABLE IF EXISTS search;'
                               ' DROP TABLE IF EXISTS terms; DROP TABLE IF EXISTS files; DROP TABLE IF EXISTS file_usage;'
-                              ' DROP TABLE IF EXISTS meta;')
+                              ' DROP TABLE IF EXISTS session_usage; DROP TABLE IF EXISTS meta;')
             con.executescript(SCHEMA)
             con.commit()
             con.execute('VACUUM')
@@ -411,6 +418,11 @@ def sync_remote(remote, directory, fetch=fetch_remote):
             con.executemany('INSERT INTO usage VALUES(?,?,?,?,?,?,?,?)',
                             [(r['day'], r['agent'], r['model'], r['new'], r['cc'], r['cr'], r['out'], r['msgs'])
                              for r in page.get('usage', [])])
+            con.execute('DELETE FROM session_usage')
+            # 旧版远端不返回 sessions，此时该远端的会话不带用量。
+            con.executemany('INSERT INTO session_usage VALUES(?,?,?,?,?,?,?)',
+                            [(r['agent'], r['session'], r['new'], r['cc'], r['cr'], r['out'], r['msgs'])
+                             for r in page.get('sessions') or []])
             stable = False
             if cursor:
                 probe = fetch(remote, f'/api/export?section=turns&cursor={cursor - 1}&limit=1')
@@ -555,7 +567,8 @@ def open_sources(con, remotes, directory):
         if not remote['enabled']:
             continue
         path = remote_path(remote, directory)
-        if not path.exists():
+        # 索引格式落后的远端库等下次同步全量重拉，期间不参与查询（状态见 /api/remotes）。
+        if not path.exists() or index_version(path) != SCHEMA_VERSION:
             continue
         try:
             remote_con = connect(path)
@@ -620,7 +633,9 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
         section = p.get('section', 'usage')
         if section == 'usage':
             return dict(meta=index_meta(con), usage=[dict(r) for r in con.execute(
-                'SELECT day,agent,model,new,cc,cr,out,msgs FROM usage ORDER BY day,agent,model')])
+                'SELECT day,agent,model,new,cc,cr,out,msgs FROM usage ORDER BY day,agent,model')],
+                sessions=[dict(r) for r in con.execute(
+                    'SELECT agent,session,new,cc,cr,out,msgs FROM session_usage ORDER BY agent,session')])
         if section == 'turns':
             try:
                 cursor = int(p.get('cursor', 0) or 0)
@@ -755,11 +770,17 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 continue
             where, values = '', []
             if p.get('agent'):
-                where, values = ' WHERE agent = ?', [p['agent']]
+                where, values = ' WHERE turns.agent = ?', [p['agent']]
+            # 该来源未勾选用量时只留轮次统计，用量列为空。
+            columns = ','.join(f'u.{field}' for field in FIELDS) if source.usage else ','.join(f'NULL AS {field}' for field in FIELDS)
             for row in source.con.execute(
-                    'SELECT agent,session,count(*) AS turns,min(timestamp) AS first,max(timestamp) AS last'
-                    ' FROM turns' + where + ' GROUP BY agent,session', values):
-                entries.append(dict(row, key=source.key, label=source.label))
+                    'SELECT turns.agent AS agent,turns.session AS session,count(*) AS turns,'
+                    'min(timestamp) AS first,max(timestamp) AS last,' + columns +
+                    ' FROM turns LEFT JOIN session_usage AS u ON u.agent=turns.agent AND u.session=turns.session'
+                    + where + ' GROUP BY turns.agent,turns.session', values):
+                entry = dict(row, key=source.key, label=source.label)
+                entry['total'] = None if entry['new'] is None else sum(entry[field] for field in FIELDS[:-1])
+                entries.append(entry)
         entries.sort(key=lambda entry: (entry['key'], entry['agent'], entry['session']))
         entries.sort(key=lambda entry: entry['first'] or '', reverse=True)
         return dict(rows=entries[(page - 1) * 50:page * 50], total=len(entries), page=page,
