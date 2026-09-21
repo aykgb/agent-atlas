@@ -460,6 +460,17 @@ def sync_remote(remote, directory, fetch=fetch_remote):
     return status
 
 
+def buckets_between(start, end, unit):
+    buckets = []
+    cursor = start
+    while cursor <= end:
+        key = bucket(cursor.isoformat(), unit)
+        if not buckets or buckets[-1] != key:
+            buckets.append(key)
+        cursor += timedelta(days=1)
+    return buckets
+
+
 def period(unit, n, today=None):
     today = today or date.today()
     if unit == 'day':
@@ -471,14 +482,7 @@ def period(unit, n, today=None):
         start = date(months // 12, months % 12 + 1, 1)
     else:
         raise ValueError('周期须为 day、week 或 month')
-    buckets = []
-    cursor = start
-    while cursor <= today:
-        key = bucket(cursor.isoformat(), unit)
-        if not buckets or buckets[-1] != key:
-            buckets.append(key)
-        cursor += timedelta(days=1)
-    return start.isoformat(), today.isoformat(), buckets
+    return start.isoformat(), today.isoformat(), buckets_between(start, today, unit)
 
 
 def bucket(day, unit):
@@ -645,7 +649,15 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
         raise ValueError('section 须为 usage 或 turns')
     if endpoint == '/api/usage':
         unit = p.get('unit', 'day')
-        start, end, buckets = period(unit, positive(p, 'n', 14, 366))
+        if p.get('start') or p.get('end'):
+            start = date.fromisoformat(p.get('start') or p.get('end'))
+            end = date.fromisoformat(p.get('end') or p.get('start'))
+            if start > end:
+                start, end = end, start
+            start, end = start.isoformat(), end.isoformat()
+            buckets = buckets_between(date.fromisoformat(start), date.fromisoformat(end), unit)
+        else:
+            start, end, buckets = period(unit, positive(p, 'n', 14, 366))
         clauses, values = bounds(dict(p, start=start, end=end))
         rows = []
         for source in sources:

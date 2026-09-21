@@ -22,5 +22,7 @@
 | 16 | 会话列表 tab + 完整会话查看 + 搜索结果跳转 | P1 | ✅ | [session-list.md](docs/tasks/session-list.md)：CDP 冒烟通过 |
 | 17 | 词频支持倒序排列（低→高返回频次最低的 N 词） | P2 | ✅ | [words-ascending-order.md](docs/tasks/words-ascending-order.md)：500a1af（契约与实测通过） |
 | 18 | 词频只看中文视图过滤开关（隐藏数字与英文） | P2 | ✅ | [words-hide-filters.md](docs/tasks/words-hide-filters.md)：契约33项+node检查通过，实测英文榜首切中文 |
+| 19 | CLI 改纯客户端：stats-today.py 从 server /api/usage 读取（含远端） | P2 | ✅ | [cli-server-backed.md](docs/tasks/cli-server-backed.md)：契约34项+node检查通过，单日/周/JSON/server未启动实测一致 |
+| 20 | CLI 表格输出优化：对齐表格（\| 分列 + 表头虚线 + 表尾线） | P3 | ✅ | [cli-table-format.md](docs/tasks/cli-table-format.md)：数值与改前逐格一致，--json 不变，契约34项+node检查通过 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。

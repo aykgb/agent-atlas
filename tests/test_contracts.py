@@ -569,6 +569,30 @@ class Contracts(unittest.TestCase):
         self.assertEqual(query(con,'/api/meta',{},sources=limited)['turns'],1)
         self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'),sources=limited)['rows']),13)
 
+    def test_usage_honors_explicit_start_end_over_n(self):
+        home=self.home/'usage-range'
+        home.mkdir()
+        self.remote_log(home,[
+            dict(type='message',id='u',message=dict(role='user',content='问题')),
+            dict(type='message',id='a',message=dict(role='assistant',model='m',content=[dict(type='text',text='答')],usage=dict(input=5,output=2))),
+        ])
+        index=self.home/'usage-range.sqlite'
+        rebuild(index,home)
+        con=connect(index)
+        self.addCleanup(con.close)
+        day=TS[:10]
+        single=query(con,'/api/usage',dict(unit='day',start=day,end=day))
+        self.assertEqual((single['start'],single['end'],single['buckets']),(day,day,[day]))
+        self.assertEqual(sum(r['total'] for r in single['rows']),7)
+        span=query(con,'/api/usage',dict(unit='day',start='2026-09-16',end='2026-09-18'))
+        self.assertEqual(span['buckets'],['2026-09-16','2026-09-17','2026-09-18'])
+        self.assertEqual(sum(r['total'] for r in span['rows']),7)
+        flipped=query(con,'/api/usage',dict(unit='day',start='2026-09-18',end='2026-09-16'))
+        self.assertEqual((flipped['start'],flipped['end']),('2026-09-16','2026-09-18'))
+        empty=query(con,'/api/usage',dict(unit='day',start='2026-09-01',end='2026-09-01'))
+        self.assertEqual(empty['rows'],[])
+        self.assertEqual(empty['buckets'],['2026-09-01'])
+
     def test_http_security_rejects_foreign_hosts_and_origins(self):
         self.assertTrue(fake_handler('127.0.0.1:18763').allowed())
         self.assertTrue(fake_handler('localhost:18763').allowed())
