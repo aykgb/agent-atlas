@@ -25,5 +25,6 @@
 | 19 | CLI 改纯客户端：stats-today.py 从 server /api/usage 读取（含远端） | P2 | ✅ | [cli-server-backed.md](docs/tasks/cli-server-backed.md)：契约34项+node检查通过，单日/周/JSON/server未启动实测一致 |
 | 20 | CLI 表格输出优化：对齐表格（\| 分列 + 表头虚线 + 表尾线） | P3 | ✅ | [cli-table-format.md](docs/tasks/cli-table-format.md)：数值与改前逐格一致，--json 不变，契约34项+node检查通过 |
 | 21 | 会话列表显示每个会话的 token 消耗（本机 + 远端） | P2 | ✅ | [session-token-usage.md](docs/tasks/session-token-usage.md)：schema v5，契约36项+node检查通过，CDP 冒烟通过；旧版远端显示「—」 |
+| 22 | 远端面板显示同步时间 | P3 | ✅ | [remote-sync-time.md](docs/tasks/remote-sync-time.md)：契约36项+node检查通过，四种状态渲染实测 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。

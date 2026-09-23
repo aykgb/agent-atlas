@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const colors = ['#6484d8', '#71b3a2', '#b49acb', '#e2b274', '#de8999', '#87acc8', '#a5b677', '#9299ad'];
 const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: [], sessionPage: 1, session: null, hideAlnum: false};
 const number = n => Number(n || 0).toLocaleString('en-US');
+const syncTime = iso => new Date(iso).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 const compact = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : number(n);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const empty = text => '<div class="empty">' + esc(text) + '</div>';
@@ -59,7 +60,7 @@ function renderRemotes() {
     const tags = [r.usage && '用量', r.search && '会话', r.words && '词频'].filter(Boolean).map(esc).join(' · ');
     const status = !r.enabled ? '<span class="subtle">已停用</span>' : r.status && r.status.error
       ? '<span class="remote-bad" title="' + esc(r.status.error) + '">同步失败</span>'
-      : r.status && r.status.turns ? '<span class="remote-good">' + number(r.status.turns) + ' 轮已同步</span>'
+      : r.status && r.status.turns ? '<span class="remote-good">' + number(r.status.turns) + ' 轮已同步' + (r.status.synced_at ? ' · ' + syncTime(r.status.synced_at) : '') + '</span>'
       : '<span class="subtle">未同步</span>';
     const sync = r.enabled ? '<button class="text-button" data-sync="' + index + '">同步</button>' : '';
     return '<div class="remote-row"><label class="remote-switch"><input type="checkbox" data-toggle="' + index + '"' + (r.enabled ? ' checked' : '') + '> 启用</label><b>' + esc(r.host) + ':' + r.port + '</b><span class="subtle">' + tags + '</span>' + status + sync + '<button class="text-button" data-index="' + index + '">移除</button></div>';
