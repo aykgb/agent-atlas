@@ -135,6 +135,60 @@ class Contracts(unittest.TestCase):
         self.assertEqual(data.usage[0]['out'],6)
         self.assertEqual(db.read_bytes(),before)
 
+    def test_opencode_reads_v2_session_message_schema(self):
+        db=self.home/'.local/share/opencode/opencode.db'
+        db.parent.mkdir(parents=True)
+        con=sqlite3.connect(db)
+        con.executescript('CREATE TABLE session_v2(id,model); CREATE TABLE session_message(id,session_id,type,seq,time_created,data);')
+        con.execute('INSERT INTO session_v2 VALUES(?,?)',('s',json.dumps(dict(id='v2-model',providerID='p'))))
+        con.executemany('INSERT INTO session_message VALUES(?,?,?,?,?,?)',[
+            ('u','s','user',1,1700000001000,json.dumps(dict(text='测试',files=[],agents=[]))),
+            ('a','s','assistant',2,1700000002000,json.dumps(dict(model=dict(id='v2-model',providerID='p'),content=[
+                dict(type='reasoning',text='先想'),
+                dict(type='tool',name='bash',state=dict(status='completed',input=dict(command='ls'),content=[dict(type='text',text='文件列表')])),
+                dict(type='text',text='回答'),
+            ],tokens=dict(input=10,output=4,reasoning=2,cache=dict(read=3,write=1))))),
+            ('i','s','idle',3,1700000003000,json.dumps(dict(outcome='succeeded'))),
+            ('y','s','synthetic',4,1700000004000,json.dumps(dict(text='SERVERWORD 注入'))),
+        ])
+        con.commit();con.close()
+        before=db.read_bytes()
+        data=collect(self.home)
+        self.assertEqual([t['input'] for t in data.turns],['测试'])
+        self.assertEqual([p['kind'] for p in data.turns[0]['output']],['思考','工具调用','工具结果','正文'])
+        self.assertEqual(data.turns[0]['output'][2]['text'],'文件列表')
+        self.assertEqual(data.usage[0]['out'],6)
+        self.assertEqual([t for t in data.turns if t.get('words') is False],[])
+        self.assertEqual(db.read_bytes(),before)
+
+    def test_opencode_reads_v1_and_v2_tables_side_by_side(self):
+        db=self.home/'.local/share/opencode/opencode.db'
+        db.parent.mkdir(parents=True)
+        con=sqlite3.connect(db)
+        con.executescript('CREATE TABLE message(id,session_id,time_created,data); CREATE TABLE part(id,message_id,time_created,data);'
+                          ' CREATE TABLE session_v2(id,model); CREATE TABLE session_message(id,session_id,type,seq,time_created,data);')
+        con.executemany('INSERT INTO message VALUES(?,?,?,?)',[
+            ('u1','old',1700000001000,json.dumps(dict(role='user',model=dict(modelID='v1-model')))),
+            ('a1','old',1700000002000,json.dumps(dict(role='assistant',parentID='u1',modelID='v1-model',
+                                                      tokens=dict(input=10,output=4,reasoning=2,cache=dict(read=3,write=1))))),
+        ])
+        con.executemany('INSERT INTO part VALUES(?,?,?,?)',[
+            ('p1','u1',1700000001000,json.dumps(dict(type='text',text='旧版输入'))),
+            ('p2','a1',1700000002000,json.dumps(dict(type='text',text='旧版回答'))),
+        ])
+        con.execute('INSERT INTO session_v2 VALUES(?,?)',('new',json.dumps(dict(id='v2-model'))))
+        con.executemany('INSERT INTO session_message VALUES(?,?,?,?,?,?)',[
+            ('u2','new','user',1,1700000003000,json.dumps(dict(text='新版输入'))),
+            ('a2','new','assistant',2,1700000004000,json.dumps(dict(model=dict(id='v2-model'),
+                                                                   content=[dict(type='text',text='新版回答')],
+                                                                   tokens=dict(input=20,output=5)))),
+        ])
+        con.commit();con.close()
+        data=collect(self.home)
+        self.assertEqual(sorted(t['input'] for t in data.turns),['新版输入','旧版输入'])
+        self.assertEqual(sorted((u['session'],u['model']) for u in data.usage),[('new','v2-model'),('old','v1-model')])
+        self.assertEqual(sum(u['out'] for u in data.usage),11)
+
     def test_malformed_records_become_warnings_instead_of_crashing_collect(self):
         self.write('.pi/agent/sessions/good.jsonl',[
             dict(type='message',id='u',message=dict(role='user',content='正常输入')),

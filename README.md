@@ -57,13 +57,13 @@ python3 stats-today.py --days 30 --json
 | Claude | `~/.claude/projects/**/*.jsonl` | assistant 的 model、usage |
 | Codex | `~/.codex/sessions/**/*.jsonl`、`~/.codex/archived_sessions/**/*.jsonl` | turn_context / world_state 模型；优先 token_usage_record，旧轮次使用 token_count |
 | Pi | `~/.pi/agent/sessions/**/*.jsonl` | assistant 的 model、usage |
-| OpenCode | `~/.local/share/opencode/opencode.db` | message 的 modelID、tokens；part 提供正文、工具调用与结果 |
+| OpenCode | `~/.local/share/opencode/opencode.db` | 旧版 `message`/`part` 与新版 `session_message`/`session_v2` 都读（可并存）；tokens 与模型按各自格式取值，正文、工具调用与结果来自 part / content |
 | Grok | `~/.grok/sessions/**/updates.jsonl` | turn_completed.usage.modelUsage 按模型拆分，缺少拆分时使用当前模型 |
 | dsh | `~/.dsh/sessions/*/session-*/session*.jsonl.zstd`（版本号高者优先） | assistant/message 的 model、usage；压缩摘要调用计入 compaction/summary 的 model、usage |
 
 总量 = 新增输入 + 缓存写入 + 缓存读取 + 输出。会话列表每行的 token 消耗即该会话全部用量记录的总量，去重后一条用量只归属一个会话（同一记录出现在多个文件时归给标识字典序最小的会话，不重复计），该来源未勾选用量时显示「—」。新增输入不含缓存；Codex、Grok 输出已含思考，不重复相加；Pi、OpenCode 单独记录的 reasoning 与 output 相加。日期统一为本地时区。调用次数来自用量记录，Grok 使用 modelCalls。
 
-Claude 同一消息的流式 usage 取各字段最大值，只计一次调用；Codex 同轮逐请求与汇总事件不重复计数，旧格式重复累计快照跳过；Pi 按消息标识、时间、模型去重；Grok 按事件标识和模型去重；OpenCode 工具调用的参数记入调用块，输出只记入工具结果，不重复；dsh 的 `inputTokens` 不含缓存读取、`outputTokens` 已含思考（totalTokens 可验证），按 assistant/message 的消息 id 去重，压缩摘要调用单独按 compactionId 计入。缺少模型时标为 unknown。零用量或错误消息可保留调用记录。
+Claude 同一消息的流式 usage 取各字段最大值，只计一次调用；Codex 同轮逐请求与汇总事件不重复计数，旧格式重复累计快照跳过；Pi 按消息标识、时间、模型去重；Grok 按事件标识和模型去重；OpenCode 旧版 `message`/`part` 与新版 `session_message` 并存时两套都读、按消息标识去重；工具调用的参数记入调用块，输出只记入工具结果，不重复；dsh 的 `inputTokens` 不含缓存读取、`outputTokens` 已含思考（totalTokens 可验证），按 assistant/message 的消息 id 去重，压缩摘要调用单独按 compactionId 计入。缺少模型时标为 unknown。零用量或错误消息可保留调用记录。
 
 只索引本机存在且可读的数据，不补算缺失历史。损坏或非对象 JSON 行跳过并在页脚提示。仅展示可见的思考文本，不解密隐藏内容。轮次按日志顺序划分；历史分叉复制的输入可能分别出现在不同会话。Codex 有明确内容类型元数据时排除自动注入的环境和规则，缺少标记的旧日志保留原始 user 消息。自动审查、子 agent 会话、压缩摘要，以及注入的环境、插件、skill、仓库指令（AGENTS.md）与命令输出等机器生成的 user 消息保留在搜索中，不计入词频。命令包装消息（如 /clear、/model）不成轮次；有后续输出的命令（如 /improve-writing）保留轮次并显示为可读命令，同样不计入词频。dsh 的注入消息（插件、skill 目录、AGENTS.md）并入当前轮的「上下文」段，压缩摘要单独成轮，都可搜索、不计词频；`system/message`（harness 系统提示）与标题生成请求不入索引。
 

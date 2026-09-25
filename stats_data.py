@@ -133,6 +133,21 @@ def blocks(content, role='assistant', channel=None):
     return result
 
 
+def opencode_blocks(content):
+    """OpenCode V2 的 content：工具部分紧接调用块给出结果，其余复用 blocks()。"""
+    result = []
+    for part in content or []:
+        if not isinstance(part, dict):
+            continue
+        result.extend(blocks([part]))
+        if part.get('type') == 'tool':
+            state = part.get('state') or {}
+            value = text_of(state.get('content')) or text_of(state.get('output'))
+            if value:
+                result.append({'kind': '工具结果', 'text': value})
+    return result
+
+
 def usage_values(agent, u):
     if agent == 'claude':
         return [u.get(k, 0) or 0 for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens')] + [1]
@@ -363,36 +378,81 @@ class Dataset:
         self.sources['opencode'] += 1
         con = sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)
         try:
-            parts = defaultdict(list)
-            for mid, raw in con.execute('select message_id,data from part order by time_created,id'):
-                parts[mid].append(json.loads(raw))
-            current = {}
-            for mid, sid, ts, raw in con.execute('select id,session_id,time_created,data from message order by time_created,id'):
-                m = json.loads(raw)
-                role = m.get('role')
-                model = m.get('modelID') or (m.get('model') or {}).get('modelID') or 'unknown'
-                if role == 'user':
-                    value = clean_input(text_of([p for p in parts[mid] if not p.get('synthetic')]))
-                    if value:
-                        turn = dict(agent='opencode', session=sid, model=model, timestamp=stamp(ts), input=value, output=[], source=str(path), key=mid)
-                        if machine_input(value):
-                            turn['words'] = False
-                        self.turns.append(turn)
-                        current[(sid, mid)] = turn
-                        current[sid] = turn
-                elif role == 'assistant':
-                    turn = current.get((sid, m.get('parentID'))) or current.get(sid)
-                    if turn:
-                        turn['output'].extend(blocks(parts[mid]))
-                        for p in parts[mid]:
-                            if p.get('type') == 'tool' and (p.get('state') or {}).get('output'):
-                                turn['output'].append({'kind': '工具结果', 'text': text_of(p['state']['output'])})
-                        models = set(turn['model'].split(' · ')) - {'unknown'}
-                        models.add(model)
-                        turn['model'] = ' · '.join(sorted(models))
-                    self.add_usage('opencode', sid, model, ts, m.get('tokens'), mid)
+            tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            # 旧版 message/part 与新版 session_message 可能并存（升级按会话迁移，未迁移的旧轮次仍在旧表），两套都读。
+            if {'message', 'part'} <= tables or 'session_message' not in tables:
+                self.read_opencode_v1(con, path)
+            if 'session_message' in tables:
+                self.read_opencode_v2(con, path, tables)
         finally:
             con.close()
+
+    def read_opencode_v1(self, con, path):
+        parts = defaultdict(list)
+        for mid, raw in con.execute('select message_id,data from part order by time_created,id'):
+            parts[mid].append(json.loads(raw))
+        current = {}
+        for mid, sid, ts, raw in con.execute('select id,session_id,time_created,data from message order by time_created,id'):
+            m = json.loads(raw)
+            role = m.get('role')
+            model = m.get('modelID') or (m.get('model') or {}).get('modelID') or 'unknown'
+            if role == 'user':
+                value = clean_input(text_of([p for p in parts[mid] if not p.get('synthetic')]))
+                if value:
+                    turn = dict(agent='opencode', session=sid, model=model, timestamp=stamp(ts), input=value, output=[], source=str(path), key=mid)
+                    if machine_input(value):
+                        turn['words'] = False
+                    self.turns.append(turn)
+                    current[(sid, mid)] = turn
+                    current[sid] = turn
+            elif role == 'assistant':
+                turn = current.get((sid, m.get('parentID'))) or current.get(sid)
+                if turn:
+                    turn['output'].extend(blocks(parts[mid]))
+                    for p in parts[mid]:
+                        if p.get('type') == 'tool' and (p.get('state') or {}).get('output'):
+                            turn['output'].append({'kind': '工具结果', 'text': text_of(p['state']['output'])})
+                    models = set(turn['model'].split(' · ')) - {'unknown'}
+                    models.add(model)
+                    turn['model'] = ' · '.join(sorted(models))
+                self.add_usage('opencode', sid, model, ts, m.get('tokens'), mid)
+
+    def read_opencode_v2(self, con, path, tables):
+        session_models = {}
+        if 'session_v2' in tables:
+            for sid, raw in con.execute('select id,model from session_v2'):
+                try:
+                    session_models[sid] = (json.loads(raw) or {}).get('id') or 'unknown'
+                except (ValueError, TypeError, AttributeError):
+                    session_models[sid] = 'unknown'
+        current = {}
+        for mid, sid, typ, ts, raw in con.execute('select id,session_id,type,time_created,data '
+                                                  'from session_message order by time_created,id'):
+            if typ not in ('user', 'assistant'):
+                continue
+            try:
+                m = json.loads(raw)
+            except ValueError:
+                self.warnings.append(f'{path.name}: {mid} 无法解析，已跳过')
+                continue
+            if typ == 'user':
+                value = clean_input(text_of(m.get('text')))
+                if value:
+                    turn = dict(agent='opencode', session=sid, model=session_models.get(sid, 'unknown'),
+                                timestamp=stamp(ts), input=value, output=[], source=str(path), key=mid)
+                    if machine_input(value):
+                        turn['words'] = False
+                    self.turns.append(turn)
+                    current[sid] = turn
+            else:
+                model = (m.get('model') or {}).get('id') or 'unknown'
+                turn = current.get(sid)
+                if turn:
+                    turn['output'].extend(opencode_blocks(m.get('content')))
+                    models = set(turn['model'].split(' · ')) - {'unknown'}
+                    models.add(model)
+                    turn['model'] = ' · '.join(sorted(models))
+                self.add_usage('opencode', sid, model, ts, m.get('tokens'), mid)
 
 
 def discover(home=None):
