@@ -414,6 +414,8 @@ def sync_remote(remote, directory, fetch=fetch_remote):
             cursor_fp = meta_value(con, 'cursor_fingerprint')
             page = fetch(remote, '/api/export?section=usage')
             updated = (page.get('meta') or {}).get('updated')
+            # sources（按 agent 的文件数）只在带 meta 的页里；usage 页总带，turns 首页在 cursor=0 时带。
+            sources = (page.get('meta') or {}).get('sources') or {}
             con.execute('DELETE FROM usage')
             con.executemany('INSERT INTO usage VALUES(?,?,?,?,?,?,?,?)',
                             [(r['day'], r['agent'], r['model'], r['new'], r['cc'], r['cr'], r['out'], r['msgs'])
@@ -438,6 +440,7 @@ def sync_remote(remote, directory, fetch=fetch_remote):
                 turns = page.get('turns') or []
                 if page.get('meta'):
                     updated = page['meta'].get('updated')
+                    sources = page['meta'].get('sources') or sources
                 for turn in turns:
                     terms = [(t['term'], t['count']) for t in turn.get('terms', [])]
                     insert_turn(con, turn['agent'], turn['session'], turn['model'], turn['timestamp'],
@@ -449,7 +452,7 @@ def sync_remote(remote, directory, fetch=fetch_remote):
                     break
             synced_at = datetime.now().astimezone().isoformat()
             meta = dict(version=SCHEMA_VERSION, host=remote['host'], port=remote['port'],
-                        updated=updated, sources=(page.get('meta') or {}).get('sources') or {},
+                        updated=updated, sources=sources,
                         cursor=cursor or 0, cursor_fingerprint=cursor_fp, synced_at=synced_at, sync_error='')
             con.execute('DELETE FROM meta')
             con.executemany('INSERT INTO meta VALUES(?,?)', [(k, json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
