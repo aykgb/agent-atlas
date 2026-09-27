@@ -16,9 +16,9 @@ from urllib.parse import parse_qs, urlsplit
 import stats_data
 from stats_data import Dataset, collect, usage_values
 from stats_server import (AUTO_REFRESH_SECONDS, LOOPBACK, Handler, Server, allowed_hosts, changed_files,
-                          clean_remotes, close_sources, connect, excluded_words, load_remotes, open_sources,
-                          period, query, rebuild, remote_path, remote_status, remotes_payload, save_excluded,
-                          save_remotes, sleep_until, sync_remote, update_index)
+                          clean_remotes, close_sources, connect, excluded_words, load_remotes, meta_value,
+                          open_sources, period, query, rebuild, remote_path, remote_status, remotes_payload,
+                          save_excluded, save_remotes, sleep_until, sync_remote, update_index)
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -544,6 +544,32 @@ class Contracts(unittest.TestCase):
         self.addCleanup(store.close)
         self.assertEqual(query(store,'/api/search',dict(q='REMOTE 丙'))['total'],1)
         self.assertEqual(query(store,'/api/search',dict(q='REMOTE 甲'))['total'],0)
+
+    def test_remote_sync_keeps_sources_across_export_pages(self):
+        remote_home=self.home/'pages-remote'
+        remote_home.mkdir()
+        self.remote_log(remote_home, [
+            row
+            for index in range(600)
+            for row in (
+                dict(type='message',id=f'u{index}',message=dict(role='user',content=f'SOURCES {index}')),
+                dict(type='message',id=f'a{index}',message=dict(role='assistant',model='rm',content=[dict(type='text',text='答')],usage=dict(input=5,output=2))),
+            )
+        ])
+        remote_index=self.home/'pages-index.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,calls=self.remote_fetch(remote_index)
+        remote=dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'pages-store'
+        directory.mkdir()
+        status=sync_remote(remote,directory,fetch)
+        self.assertIsNone(status['error'])
+        self.assertEqual(status['turns'],600)
+        self.assertTrue(any('cursor=0' in path for path in calls))
+        self.assertTrue(any('cursor=500' in path for path in calls))
+        store=connect(remote_path(remote,directory))
+        self.addCleanup(store.close)
+        self.assertEqual(meta_value(store,'sources'),{'pi':1})
 
     def test_remote_sync_failure_keeps_previous_data(self):
         remote_home=self.home/'fail-remote'
