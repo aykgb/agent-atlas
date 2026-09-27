@@ -8,6 +8,17 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 PID_FILE="$ROOT/.stats/server.pid"
 LOG="$ROOT/.stats/server.log"
 
+# 输出可用的解释器：优先 .venv（macOS / 原生 Linux），其次 .venv-linux（Windows 与 Linux 共用工作区时的 Linux venv）
+python_bin() {
+  for candidate in "$ROOT/.venv/bin/python" "$ROOT/.venv-linux/bin/python"; do
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # 输出存活的服务 PID；无则返回 1
 server_pid() {
   [ -f "$PID_FILE" ] || return 1
@@ -61,9 +72,13 @@ start() {
     echo "状态: 运行中"
     return 0
   fi
+  if ! python=$(python_bin); then
+    echo "未找到 Python 环境：先 uv sync（Linux 与 Windows 共用工作区时用 UV_PROJECT_ENVIRONMENT=.venv-linux uv sync）" >&2
+    return 1
+  fi
   mkdir -p "$ROOT/.stats"
   rm -f "$PID_FILE"
-  nohup "$ROOT/.venv/bin/python" "$ROOT/stats_server.py" "$@" >>"$LOG" 2>&1 &
+  nohup "$python" "$ROOT/stats_server.py" "$@" >>"$LOG" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" > "$PID_FILE"
   sleep 1

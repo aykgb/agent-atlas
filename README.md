@@ -14,6 +14,16 @@ uv sync
 
 打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止，或用 `./server.sh start | stop | restart | status` 后台运行（Windows 用 `server.ps1`，命令相同；PID 与日志都在 `.stats/`）。端口被占用时使用 `--port 18764`。索引构建期间服务 HTTP 尚未监听，start/status 会阻塞到就绪才返回。
 
+Windows 与 Linux 共用同一份工作区（例如仓库放在 Windows 盘、由 WSL 挂载）时，`.venv` 只属于创建它的系统：Windows 下是 `.venv\Scripts\python.exe`，Linux 下是 `.venv/bin/python`，两者互不通用。此时 Linux 侧另建一份 `.venv-linux`，命令里把 `.venv/bin/python` 换成 `.venv-linux/bin/python`；`./server.sh` 两种路径都认（先 `.venv/bin/python`，再 `.venv-linux/bin/python`），后台运行方式不变。
+
+`.stats/index.sqlite` 是默认索引（不含 `--home`），两个系统的默认日志根目录不同却共用同一个文件，会互相覆盖、各自重建，且切换系统后要等刷新才显示当前系统的数据。Linux 侧加 `--home "$HOME"` 使用独立索引（`index-*.sqlite`），与 Windows 的 `index.sqlite` 互不影响：
+
+```sh
+UV_PROJECT_ENVIRONMENT=.venv-linux uv sync
+.venv-linux/bin/python stats_server.py --home "$HOME"
+./server.sh start --home "$HOME"
+```
+
 远端经反向代理访问时，用 `--host` 指定监听地址（`0.0.0.0`、局域网或 Tailscale 的 IP），用 `--allow-host` 放行访问用的域名或 IP（可重复；默认已放行 Tailscale 地址 `100.64.216.70`）：
 
 ```sh

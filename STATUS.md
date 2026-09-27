@@ -27,5 +27,6 @@
 | 21 | 会话列表显示每个会话的 token 消耗（本机 + 远端） | P2 | ✅ | [session-token-usage.md](docs/tasks/session-token-usage.md)：schema v5，契约36项+node检查通过，CDP 冒烟通过；旧版远端显示「—」 |
 | 22 | 远端面板显示同步时间 | P3 | ✅ | [remote-sync-time.md](docs/tasks/remote-sync-time.md)：契约36项+node检查通过，四种状态渲染实测 |
 | 23 | OpenCode 支持新版 session_message/session_v2（与旧版并存都读） | P2 | ✅ | [opencode-v2-schema.md](docs/tasks/opencode-v2-schema.md)：契约38项+node检查通过 |
+| 24 | Windows 与 Linux 共用工作区：Linux 另建 .venv-linux、server.sh 探测解释器并 LF 化 | P2 | ✅ | [cross-platform-env.md](docs/tasks/cross-platform-env.md)：start/status/stop 实测通过，契约38项+node检查通过 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。

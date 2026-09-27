@@ -23,7 +23,8 @@
 | 命令 | 用途 |
 | --- | --- |
 | `uv sync` | 安装依赖到 .venv |
-| `.venv/bin/python stats_server.py` | 启动服务（端口 18763） |
+| `UV_PROJECT_ENVIRONMENT=.venv-linux uv sync` | Windows 与 Linux 共用工作区时，Linux 侧另建 .venv-linux（server.sh 自动识别） |
+| `.venv/bin/python stats_server.py` | 启动服务（端口 18763）；Linux 无原生 .venv 时换 `.venv-linux/bin/python` |
 | `./server.sh start \| stop \| restart \| status` | 服务控制（后台运行，日志 .stats/server.log） |
 | `.\server.ps1 start \| stop \| restart \| status` | 同上（Windows） |
 | `.venv/bin/python stats_server.py --reindex` | 重建索引后退出 |
