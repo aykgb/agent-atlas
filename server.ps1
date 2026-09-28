@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $Root     = $PSScriptRoot
 $StatsDir = Join-Path $Root '.stats'
 $PidFile  = Join-Path $StatsDir 'server.pid'
+$UrlFile  = Join-Path $StatsDir 'server.url'
 $OutLog   = Join-Path $StatsDir 'server.log'
 $ErrLog   = Join-Path $StatsDir 'server.err.log'
 $Python   = Join-Path $Root '.venv/Scripts/python.exe'
@@ -74,9 +75,14 @@ function Write-StartupFailure {
   }
 }
 
-# 从服务参数（或运行中进程的命令行）推导访问地址，口径同 stats_server.py 的启动打印
+# 从服务参数（或运行中进程的命令行）推导访问地址，口径同 stats_server.py 的启动打印；
+# 服务启动时写下的 .stats/server.url 优先（端口可能来自 local.json，命令行里没有）
 function Get-ServerUrl {
   param([string[]]$Tokens)
+  if (Test-Path -LiteralPath $UrlFile) {
+    $saved = (Get-Content -LiteralPath $UrlFile -Raw) -replace '\s+$', ''
+    if ($saved) { return $saved }
+  }
   $port = 18763
   $hostName = '127.0.0.1'
   for ($i = 0; $i -lt $Tokens.Count; $i++) {
@@ -86,6 +92,20 @@ function Get-ServerUrl {
   if ($hostName -in @('0.0.0.0', '::')) { $hostName = '127.0.0.1' }
   if ($hostName -like '*:*') { $hostName = "[$hostName]" }
   "http://${hostName}:$port"
+}
+
+# 等出服务写下的实际地址（启动时写，早于索引构建）；进程退出或超时则回退到参数解析
+function Wait-ServerUrl {
+  param([int]$ProcId, [string[]]$Tokens)
+  for ($i = 0; $i -lt 30; $i++) {
+    if (Test-Path -LiteralPath $UrlFile) {
+      $saved = (Get-Content -LiteralPath $UrlFile -Raw) -replace '\s+$', ''
+      if ($saved) { return $saved }
+    }
+    if (-not (Get-Process -Id $ProcId -ErrorAction SilentlyContinue)) { break }
+    Start-Sleep -Seconds 1
+  }
+  return Get-ServerUrl -Tokens $Tokens
 }
 
 # 探测服务并返回索引元数据；未就绪时 $null
@@ -144,6 +164,7 @@ function Start-Server {
   }
   New-Item -ItemType Directory -Force -Path $StatsDir | Out-Null
   Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $UrlFile -ErrorAction SilentlyContinue
   # 经 WMI 起中间 pwsh（由 svchost 托管，不在 SSH 会话的 job object 里）：
   # 直接 Start-Process 起的进程会在 OpenSSH 会话结束时被整组杀掉（本机实测，同 mc.ps1）。
   # 中间层起完 python 即退出，python 被托管给系统，不受会话生命周期影响。
@@ -193,7 +214,7 @@ function Start-Server {
   Set-Content -LiteralPath $PidFile -Value $serverProc.ProcessId
   Start-Sleep -Seconds 1
   if (Get-ServerPid) {
-    $url = Get-ServerUrl -Tokens $ServerArgs
+    $url = Wait-ServerUrl -ProcId $serverProc.ProcessId -Tokens $ServerArgs
     Write-Ok "已启动 (PID $($serverProc.ProcessId))"
     Write-Output "打开 $url"
     Wait-ServerReady -Url $url
@@ -211,6 +232,7 @@ function Stop-Server {
   $procId = Get-ServerPid
   if (-not $procId) {
     Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $UrlFile -ErrorAction SilentlyContinue
     Write-Output '未在运行'
     return
   }
@@ -241,6 +263,7 @@ function Stop-Server {
     Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
   }
   Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $UrlFile -ErrorAction SilentlyContinue
   Write-Ok "已停止 (PID $procId)"
 }
 

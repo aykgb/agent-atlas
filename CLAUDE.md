@@ -4,7 +4,7 @@
 
 ## Project map
 
-- `stats_server.py` — HTTP 服务，默认 127.0.0.1:18763；建索引与查询
+- `stats_server.py` — HTTP 服务，默认 127.0.0.1:18763；建索引与查询；启动参数可由 `local.json` 提供
 - `stats_data.py` — 日志解析、去重与聚合（六类 agent 日志）
 - `stats-today.py` — CLI，从 server `/api/usage` 读取（含远端），需服务运行；`--url` 指定地址
 - `server.sh` / `server.ps1` — 服务控制：start / stop / restart / status（macOS / Windows），PID 与日志存于 .stats/
@@ -15,8 +15,9 @@
 - `skills/status/SKILL.md` — 项目状态 skill：读 STATUS.md 并采集服务/索引/远端/git 实况
 - `docs/tasks/` — 任务文档：方案、实测与验收标准
 - `remotes.json` — 远端汇入配置（运行时生成，不入库）
+- `local.json` — 本机启动参数（port/host/home/allow_host，启动时读、启动成功后写回，不入库；命令行参数优先）
 - `words-exclude.txt` — 词频排除词（运行时生成，不入库）
-- `.stats/` — 派生索引（本机 index*.sqlite、每台远端 remote-*.sqlite）与服务 PID/日志，可删，下次启动自动重建（远端需重新同步）
+- `.stats/` — 派生索引（按日志根目录命名的本机 index-*.sqlite、每台远端 remote-*.sqlite）、实际访问地址 server.url 与服务 PID/日志，可删，下次启动自动重建（远端需重新同步）
 
 <important if="you need to run commands to install, start, or verify">
 
@@ -46,7 +47,7 @@
 
 <important if="you are about to commit">
 - 先运行 README「验证」一节的两条命令（测试 + node --check），全部通过。
-- 提交内容不含本地 agent session 数据（.stats/ 索引、words-exclude.txt、remotes.json、日志原文）；测试夹具只用合成内容。
+- 提交内容不含本地 agent session 数据（.stats/ 索引、words-exclude.txt、remotes.json、local.json、日志原文）；测试夹具只用合成内容。
 </important>
 
 <important if="you are adding dependencies or frontend resources">
@@ -65,6 +66,12 @@
 - 查询时合并本机与启用中的远端（用量/会话/词频按勾选）；轮次 id 形如 `<key>:<id>`，详情按前缀路由。
 - `remotes.json` 是本地个人配置（gitignore）；POST /api/remotes、/api/sync 与其它写操作一样仅限本机。
 - 勾选 words 隐含 search：词频轮次必须可搜索、可打开。
+</important>
+
+<important if="you are modifying startup config (local.json, argparse defaults)">
+- `local.json`（仓库根目录，gitignore）提供本机启动参数默认值：`port`、`host`、`home`、`allow_host`；命令行显式参数优先，字段非法或文件缺失用内置默认。
+- 服务启动成功（已监听）后把生效的四个参数写回 `local.json`（`home` 未指定时写当前用户主目录），写失败不影响服务；`--reindex` 不写回。
+- 索引命名：索引文件按解析后的 `home`（未指定为当前用户主目录）取 8 位哈希，形如 `index-<哈希>.sqlite`（`index_suffix`），不同日志根目录各自独立；服务把实际访问地址写入 `.stats/server.url`，`server.sh` / `server.ps1` 优先据此推导地址，缺失时回退命令行解析。
 </important>
 
 <important if="you are modifying the local index or refresh (rebuild, update_index)">

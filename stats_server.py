@@ -21,6 +21,7 @@ from stats_data import FIELDS, TOOLS, Dataset, discover, read_agent
 ROOT = Path(__file__).resolve().parent
 EXCLUDE_FILE = ROOT / 'words-exclude.txt'
 REMOTES_FILE = ROOT / 'remotes.json'
+LOCAL_FILE = ROOT / 'local.json'
 SCHEMA_VERSION = 5
 AUTO_REFRESH_SECONDS = 30 * 60
 AUTO_REFRESH_STEP_SECONDS = 60
@@ -105,6 +106,56 @@ def save_remotes(entries, path=REMOTES_FILE):
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
     return remotes
+
+
+def clean_local(config):
+    """把 local.json 清洗成本机启动参数；非法字段丢弃，缺失即用内置默认。"""
+    if not isinstance(config, dict):
+        return {}
+    cleaned = {}
+    port = config.get('port')
+    if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
+        cleaned['port'] = port
+    for key in ('host', 'home'):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            cleaned[key] = value.strip()
+    allowed = config.get('allow_host')
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    if isinstance(allowed, list):
+        cleaned['allow_host'] = [item.strip() for item in allowed if isinstance(item, str) and item.strip()]
+    return cleaned
+
+
+def load_local(path=LOCAL_FILE):
+    try:
+        return clean_local(json.loads(path.read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        return {}
+
+
+def save_local(config, path=LOCAL_FILE):
+    """把本机启动参数写回 local.json（启动成功后同步，供下次启动复用）。"""
+    cleaned = clean_local(config)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return cleaned
+
+
+def index_suffix(home):
+    """索引文件后缀：按解析后的日志根目录（home，缺省为当前用户主目录）区分，形如 -<8位哈希>。"""
+    resolved = str(Path(home).resolve()) if home else str(Path.home().resolve())
+    return '-' + hashlib.sha256(resolved.encode()).hexdigest()[:8]
+
+
+def display_url(host, port):
+    address = host if host not in ('0.0.0.0', '::') else '127.0.0.1'
+    if ':' in address:
+        address = '[' + address + ']'
+    return f'http://{address}:{port}'
 
 
 def fetch_remote(remote, path, timeout=30):
@@ -972,24 +1023,37 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-def main():
+def parse_args(argv=None, defaults=None):
+    """解析启动参数；defaults 为 local.json 的默认值（缺省时现读），命令行显式参数优先。"""
+    if defaults is None:
+        defaults = load_local()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--port', type=int, default=18763)
-    parser.add_argument('--host', default='127.0.0.1', help='监听地址，默认仅本机')
-    parser.add_argument('--allow-host', action='append', default=[], metavar='HOST',
+    parser.add_argument('--port', type=int, default=defaults.get('port', 18763))
+    parser.add_argument('--host', default=defaults.get('host', '127.0.0.1'), help='监听地址，默认仅本机')
+    parser.add_argument('--allow-host', action='append', default=None, metavar='HOST',
                         help=f'额外放行的访问域名或 IP（可重复；默认已放行 {"、".join(DEFAULT_ALLOWED)}）')
-    parser.add_argument('--home', help='日志所在的用户目录')
+    parser.add_argument('--home', default=defaults.get('home'), help='日志所在的用户目录')
     parser.add_argument('--reindex', action='store_true', help='全量重建索引后退出')
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.allow_host is None:
+        args.allow_host = list(defaults.get('allow_host', []))
+    return args
+
+
+def main():
+    args = parse_args()
     directory = ROOT / '.stats'
     directory.mkdir(mode=0o700, exist_ok=True)
-    suffix = '' if args.home is None else '-' + hashlib.sha256(str(Path(args.home).resolve()).encode()).hexdigest()[:8]
-    path = directory / f'index{suffix}.sqlite'
+    home = str(Path(args.home).resolve()) if args.home else str(Path.home().resolve())
+    path = directory / f'index{index_suffix(args.home)}.sqlite'
     if args.reindex:
         print('正在全量重建索引…', flush=True)
         rebuild(path, args.home)
         print('索引完成。')
         return
+    # 先落地址再建索引：控制脚本要按实际端口探测就绪（端口可能来自 local.json，命令行里没有）
+    url = display_url(args.host, args.port)
+    (directory / 'server.url').write_text(url + '\n', encoding='utf-8')
     if not path.exists() or index_version(path) != SCHEMA_VERSION:
         print('正在读取本机会话并构建索引…', flush=True)
         rebuild(path, args.home)
@@ -997,11 +1061,13 @@ def main():
     server.db, server.home, server.directory = path, args.home, directory
     server.refresh_lock = threading.Lock()
     server.allowed_names = allowed_hosts(args.host, args.allow_host)
+    # 启动成功（已监听）后把生效参数同步回 local.json，供下次启动复用；写失败不影响服务
+    try:
+        save_local({'port': args.port, 'host': args.host, 'home': home, 'allow_host': list(args.allow_host)})
+    except OSError as error:
+        print(f'无法写入 local.json：{error}', flush=True)
     threading.Thread(target=watch_index, args=(server,), daemon=True).start()
-    address = args.host if args.host not in ('0.0.0.0', '::') else '127.0.0.1'
-    if ':' in address:
-        address = '[' + address + ']'
-    print(f'打开 http://{address}:{args.port} · Ctrl+C 停止', flush=True)
+    print(f'打开 {url} · Ctrl+C 停止', flush=True)
     print(f'每 {AUTO_REFRESH_SECONDS // 60} 分钟自动检查会话更新', flush=True)
     print('远端放行 Host：' + '、'.join(sorted(server.allowed_names - LOOPBACK)), flush=True)
     try:

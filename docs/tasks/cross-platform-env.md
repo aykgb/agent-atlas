@@ -39,3 +39,7 @@
 - 不合并 Windows 与 Linux 的 venv：同一目录无法同时满足两套布局与 `pyvenv.cfg`。
 - 不逐个转换工作区文件：EOL 交给 `.gitattributes` 的 `* text=auto` 处理（仓库内存 LF、检出按平台），不手工改写其余文件。
 - 不在 `server.sh` 里自动注入 `--home`（避免隐式改 CLI 语义），由使用者显式传入。
+
+## 后续（2026-09-28，任务 25）
+
+索引命名已统一：本机索引一律按解析后的日志根目录（`home`，未指定为当前用户主目录）取 8 位哈希，形如 `index-<哈希>.sqlite`，不再使用固定的 `index.sqlite`。因此共用工作区里 Windows 与 Linux 主目录不同即自动落到不同索引文件，本文档「Linux 侧显式 `--home "$HOME"` 以隔离索引」不再是必需（`--home "$HOME"` 仍指向同一文件 `index-3e157b1c.sqlite`）。

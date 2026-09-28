@@ -6,6 +6,7 @@ set -eu
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 PID_FILE="$ROOT/.stats/server.pid"
+URL_FILE="$ROOT/.stats/server.url"
 LOG="$ROOT/.stats/server.log"
 
 # 输出可用的解释器：优先 .venv（macOS / 原生 Linux），其次 .venv-linux（Windows 与 Linux 共用工作区时的 Linux venv）
@@ -46,6 +47,30 @@ parse_url() {
   printf 'http://%s:%s\n' "$host" "$port"
 }
 
+# 实际访问地址：服务启动时写下的 .stats/server.url 优先（端口可能来自 local.json，命令行里没有）；
+# 缺失时回退到运行中进程的命令行解析
+server_url() {
+  pid=$1
+  if [ -s "$URL_FILE" ]; then
+    cat "$URL_FILE"
+    return 0
+  fi
+  parse_url $(ps -p "$pid" -o command=)
+}
+
+# 等出服务写下的实际地址（启动时写，早于索引构建）；等待期间进程退出或超时返回 1
+wait_url() {
+  pid=$1
+  i=0
+  while [ ! -s "$URL_FILE" ]; do
+    kill -0 "$pid" 2>/dev/null || return 1
+    i=$((i + 1))
+    [ "$i" -le 30 ] || return 1
+    sleep 1
+  done
+  cat "$URL_FILE"
+}
+
 # 阻塞直到 /api/meta 就绪（索引构建期间 HTTP 尚未监听）；等待期间进程退出返回 1
 wait_ready() {
   url=$1
@@ -63,7 +88,7 @@ wait_ready() {
 
 start() {
   if pid=$(server_pid); then
-    url=$(parse_url $(ps -p "$pid" -o command=))
+    url=$(server_url "$pid")
     echo "已在运行 (PID $pid)，打开 $url"
     if ! wait_ready "$url" "$pid"; then
       echo "服务进程已退出" >&2
@@ -77,23 +102,23 @@ start() {
     return 1
   fi
   mkdir -p "$ROOT/.stats"
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$URL_FILE"
   nohup "$python" "$ROOT/stats_server.py" "$@" >>"$LOG" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" > "$PID_FILE"
   sleep 1
   if server_pid >/dev/null; then
-    url=$(parse_url "$@")
+    url=$(wait_url "$pid") || url=$(parse_url "$@")
     echo "已启动 (PID $pid)，打开 $url"
     if ! wait_ready "$url" "$pid"; then
-      rm -f "$PID_FILE"
+      rm -f "$PID_FILE" "$URL_FILE"
       echo "启动失败，最近日志：" >&2
       tail -n 5 "$LOG" >&2
       return 1
     fi
     echo "状态: 运行中，日志 $LOG"
   else
-    rm -f "$PID_FILE"
+    rm -f "$PID_FILE" "$URL_FILE"
     echo "启动失败，最近日志：" >&2
     tail -n 5 "$LOG" >&2
     return 1
@@ -102,7 +127,7 @@ start() {
 
 status() {
   if pid=$(server_pid); then
-    url=$(parse_url $(ps -p "$pid" -o command=))
+    url=$(server_url "$pid")
     echo "运行中 (PID $pid)，日志 $LOG"
     if ! wait_ready "$url" "$pid"; then
       echo "服务进程已退出" >&2
@@ -116,7 +141,7 @@ status() {
 }
 
 stop() {
-  pid=$(server_pid) || { rm -f "$PID_FILE"; echo "未在运行"; return 0; }
+  pid=$(server_pid) || { rm -f "$PID_FILE" "$URL_FILE"; echo "未在运行"; return 0; }
   kill "$pid"
   i=0
   while [ "$i" -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
@@ -126,7 +151,7 @@ stop() {
   if kill -0 "$pid" 2>/dev/null; then
     kill -9 "$pid"
   fi
-  rm -f "$PID_FILE"
+  rm -f "$PID_FILE" "$URL_FILE"
   echo "已停止 (PID $pid)"
 }
 

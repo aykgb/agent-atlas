@@ -12,16 +12,24 @@ uv sync
 .venv/bin/python stats_server.py
 ```
 
-打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止，或用 `./server.sh start | stop | restart | status` 后台运行（Windows 用 `server.ps1`，命令相同；PID 与日志都在 `.stats/`）。端口被占用时使用 `--port 18764`。索引构建期间服务 HTTP 尚未监听，start/status 会阻塞到就绪才返回。
+打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止，或用 `./server.sh start | stop | restart | status` 后台运行（Windows 用 `server.ps1`，命令相同；PID 与日志都在 `.stats/`）。索引构建期间服务 HTTP 尚未监听，start/status 会阻塞到就绪才返回。
+
+启动参数（`--port`、`--host`、`--home`、`--allow-host`）可写入仓库根目录 `local.json`（个人配置，不入库，可手工编辑），服务启动时读取，命令行显式参数覆盖它；文件不存在或字段非法时用默认值。服务**每次启动成功后会把这些参数（含生效的 `home`）写回 `local.json`**，所以 `./server.sh start --port 18764` 只需敲一次，之后 `local.json` 就记住了：
+
+```json
+{ "port": 18764, "host": "127.0.0.1", "home": "/home/wangc", "allow_host": ["stats.example.com"] }
+```
+
+索引文件按解析后的 `home`（未指定时为当前用户主目录）命名，形如 `.stats/index-<8位哈希>.sqlite`，不同日志根目录各自独立、互不覆盖。服务启动时还把实际访问地址写入 `.stats/server.url`（`0.0.0.0`、`::` 归一为 `127.0.0.1`），`server.sh` / `server.ps1` 据此打印与探测地址；端口只在 `local.json` 里、命令行没有时也能对上。
 
 Windows 与 Linux 共用同一份工作区（例如仓库放在 Windows 盘、由 WSL 挂载）时，`.venv` 只属于创建它的系统：Windows 下是 `.venv\Scripts\python.exe`，Linux 下是 `.venv/bin/python`，两者互不通用。此时 Linux 侧另建一份 `.venv-linux`，命令里把 `.venv/bin/python` 换成 `.venv-linux/bin/python`；`./server.sh` 两种路径都认（先 `.venv/bin/python`，再 `.venv-linux/bin/python`），后台运行方式不变。
 
-`.stats/index.sqlite` 是默认索引（不含 `--home`），两个系统的默认日志根目录不同却共用同一个文件，会互相覆盖、各自重建，且切换系统后要等刷新才显示当前系统的数据。Linux 侧加 `--home "$HOME"` 使用独立索引（`index-*.sqlite`），与 Windows 的 `index.sqlite` 互不影响：
+共用工作区时，两个系统的当前用户主目录不同，索引文件名也就不同（各为 `index-<8位哈希>.sqlite`），天然互不覆盖、无需额外参数：
 
 ```sh
 UV_PROJECT_ENVIRONMENT=.venv-linux uv sync
-.venv-linux/bin/python stats_server.py --home "$HOME"
-./server.sh start --home "$HOME"
+.venv-linux/bin/python stats_server.py
+./server.sh start
 ```
 
 远端经反向代理访问时，用 `--host` 指定监听地址（`0.0.0.0`、局域网或 Tailscale 的 IP），用 `--allow-host` 放行访问用的域名或 IP（可重复；默认已放行 Tailscale 地址 `100.64.216.70`）：
@@ -32,11 +40,11 @@ UV_PROJECT_ENVIRONMENT=.venv-linux uv sync
 
 Host 与 Origin 始终校验，只接受回环地址和放行名单。GET 查询对放行的远端开放；刷新索引、编辑排除词、配置与同步远端仅限本机直连，远端页面会隐藏这些操作。服务本身不带鉴权且远端可见全部会话原文，访问控制交给 Tailscale、内网或反向代理；代理需透传原始 Host 与 X-Forwarded-For / X-Real-IP，否则远端请求会被误判为本机。
 
-筛选栏下方的「远端主机」面板可配置多台远端（主机 + 端口），每台独立启用/停用，并分别选择汇入用量、会话索引、词频。本机索引与远端数据分开存放：`.stats/index.sqlite` 只含本机日志，每台远端一个 `.stats/remote-*.sqlite`。停用只在查询时排除该远端，不删除已同步数据；移除才删除对应文件。远端需运行同一版本并放行本机 Host，端口可用 Tailscale 地址或 SSH 隧道映射。新增或点「同步」时主动 GET 远端 `/api/export` 增量拉取：远端索引未重建时只取新增轮次，重建过（轮次指纹对不上）则自动全量重拉。查询时合并本机与启用中的远端：用量相加、词频相加、搜索按时间归并分页、轮次 id 带来源前缀，详情按前缀路由。远端不可达时保留上次数据，只在面板与页脚标记失败。词频需要会话索引；勾选词频会自动包含会话。远端配置存于仓库根目录 `remotes.json`（JSON 数组，可手工编辑，不入库）。
+筛选栏下方的「远端主机」面板可配置多台远端（主机 + 端口），每台独立启用/停用，并分别选择汇入用量、会话索引、词频。本机索引与远端数据分开存放：`.stats/index-<8位哈希>.sqlite` 只含本机日志，每台远端一个 `.stats/remote-*.sqlite`。停用只在查询时排除该远端，不删除已同步数据；移除才删除对应文件。远端需运行同一版本并放行本机 Host，端口可用 Tailscale 地址或 SSH 隧道映射。新增或点「同步」时主动 GET 远端 `/api/export` 增量拉取：远端索引未重建时只取新增轮次，重建过（轮次指纹对不上）则自动全量重拉。查询时合并本机与启用中的远端：用量相加、词频相加、搜索按时间归并分页、轮次 id 带来源前缀，详情按前缀路由。远端不可达时保留上次数据，只在面板与页脚标记失败。词频需要会话索引；勾选词频会自动包含会话。远端配置存于仓库根目录 `remotes.json`（JSON 数组，可手工编辑，不入库）。
 
 首次启动全量建立索引；之后点击「刷新数据」按增量更新：只重解析有变化的 session 文件（meta 记录毫秒水位 `indexed_at`，结合 `files` 表的大小判断），并同步启用中的远端。服务运行期间每 30 分钟自动检查一次，有新增、变化或消失的 session 文件才更新本机索引（只更新本机，不自动同步远端）；检查按挂钟计时，系统睡眠跨过检查点时唤醒后 60 秒内补查。已打开的页面每 60 秒对比一次数据版本（`updated`、`turns`、`sessions`），有变化自动刷新，切回前台时立即对比。完成前仍可查询旧索引。`.venv/bin/python stats_server.py --reindex` 强制全量重建。
 
-原始日志只读。索引在 `.stats/index.sqlite`，包含会话原文，不上传远端，不加载第三方网页资源。删除 `.stats` 后会在下次启动重建（远端数据需重新同步）。中文分词只依赖 jieba，其余后端使用 Python 标准库，前端使用原生 JavaScript 和 SVG。
+原始日志只读。索引在 `.stats/index-<8位哈希>.sqlite`（按日志根目录命名），包含会话原文，不上传远端，不加载第三方网页资源。删除 `.stats` 后会在下次启动重建（远端数据需重新同步）。中文分词只依赖 jieba，其余后端使用 Python 标准库，前端使用原生 JavaScript 和 SVG。
 
 ## 命令行
 
@@ -50,7 +58,7 @@ python3 stats-today.py --days 30
 python3 stats-today.py --days 30 --json
 ```
 
-默认显示 agent × 模型明细；多日查询额外显示每日各 agent 总量。JSON 返回日期、agent、模型三个维度聚合。`--url` 指定 server 地址（默认 `http://127.0.0.1:18763`），server 未启动时报错退出。服务支持 `--home /path/to/home` 指定其他日志根目录，索引单独存放（`index-*.sqlite`），不影响默认索引。
+默认显示 agent × 模型明细；多日查询额外显示每日各 agent 总量。JSON 返回日期、agent、模型三个维度聚合。`--url` 指定 server 地址（默认 `http://127.0.0.1:18763`），server 未启动时报错退出。服务支持 `--home /path/to/home` 指定其他日志根目录，索引独立存放（`index-<8位哈希>.sqlite`），不影响当前日志根目录的索引；该参数也可写在 `local.json`。
 
 ## 页面操作
 

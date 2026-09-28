@@ -28,5 +28,6 @@
 | 22 | 远端面板显示同步时间 | P3 | ✅ | [remote-sync-time.md](docs/tasks/remote-sync-time.md)：契约36项+node检查通过，四种状态渲染实测 |
 | 23 | OpenCode 支持新版 session_message/session_v2（与旧版并存都读） | P2 | ✅ | [opencode-v2-schema.md](docs/tasks/opencode-v2-schema.md)：契约38项+node检查通过 |
 | 24 | Windows 与 Linux 共用工作区：Linux 另建 .venv-linux、server.sh 探测解释器并 LF 化 | P2 | ✅ | [cross-platform-env.md](docs/tasks/cross-platform-env.md)：start/status/stop 实测通过，契约38项+node检查通过 |
+| 25 | local.json 本机启动参数（读写：CLI 优先，启动后写回；索引统一按 home 命名） | P2 | ✅ | [local-json-config.md](docs/tasks/local-json-config.md)：契约44项+`sh -n`+node 检查通过，写回实测；与任务 24 统一为 `index-<hash>.sqlite` |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。
