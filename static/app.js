@@ -62,11 +62,18 @@ function renderRemotes() {
       ? '<span class="remote-bad" title="' + esc(r.status.error) + '">同步失败</span>'
       : r.status && r.status.turns ? '<span class="remote-good">' + number(r.status.turns) + ' 轮已同步' + (r.status.synced_at ? ' · ' + syncTime(r.status.synced_at) : '') + '</span>'
       : '<span class="subtle">未同步</span>';
+    const address = esc(r.host) + ':' + r.port;
+    const label = '<input class="remote-label" data-label="' + index + '" value="' + esc(r.label || '') + '" placeholder="备注名" aria-label="备注名">';
     const sync = r.enabled ? '<button class="text-button" data-sync="' + index + '">同步</button>' : '';
-    return '<div class="remote-row"><label class="remote-switch"><input type="checkbox" data-toggle="' + index + '"' + (r.enabled ? ' checked' : '') + '> 启用</label><b>' + esc(r.host) + ':' + r.port + '</b><span class="subtle">' + tags + '</span>' + status + sync + '<button class="text-button" data-index="' + index + '">移除</button></div>';
+    return '<div class="remote-row"><label class="remote-switch"><input type="checkbox" data-toggle="' + index + '"' + (r.enabled ? ' checked' : '') + '> 启用</label>' + label + '<a class="remote-host" href="http://' + address + '/" target="_blank" rel="noopener">' + address + '</a><span class="subtle">' + tags + '</span>' + status + '<span class="remote-actions">' + sync + '<button class="text-button" data-index="' + index + '">移除</button></span></div>';
   }).join('');
   $('remoteList').querySelectorAll('input[data-toggle]').forEach(box => box.addEventListener('change', () =>
     saveRemotes(state.remotes.map((r, index) => index === +box.dataset.toggle ? {...r, enabled: box.checked} : r))));
+  $('remoteList').querySelectorAll('input[data-label]').forEach(input => {
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') input.blur(); });
+    input.addEventListener('change', () =>
+      saveRemotes(state.remotes.map((r, index) => index === +input.dataset.label ? {...r, label: input.value.trim()} : r)));
+  });
   $('remoteList').querySelectorAll('button[data-sync]').forEach(button => button.addEventListener('click', () => {
     const remote = state.remotes[+button.dataset.sync];
     syncRemotes({host: remote.host, port: remote.port});

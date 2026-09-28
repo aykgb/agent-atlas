@@ -443,16 +443,17 @@ class Contracts(unittest.TestCase):
     def test_remotes_config_validates_dedupes_and_forces_words_to_search(self):
         path=self.home/'remotes.json'
         self.assertEqual(clean_remotes([
-            dict(host=' Desk.local ',port='28763',usage=True,search=False,words=True),
+            dict(host=' Desk.local ',port='28763',usage=True,search=False,words=True,label=' 书房 Mac '),
             dict(host='desk.local',port=28763),
             dict(host='',port=1),
             dict(host='ok.local',port=70000),
             'junk',
-        ]),[dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)])
+        ]),[dict(host='desk.local',port=28763,label='书房 Mac',enabled=True,usage=True,search=True,words=True)])
         self.assertEqual(clean_remotes([dict(host='off.local',port=9,enabled=False)]),
-                         [dict(host='off.local',port=9,enabled=False,usage=True,search=True,words=True)])
+                         [dict(host='off.local',port=9,label='',enabled=False,usage=True,search=True,words=True)])
+        self.assertEqual(clean_remotes([dict(host='x.local',port=9,label=7)])[0]['label'],'7')
         saved=save_remotes([dict(host=' Desk.local ',port='28763',usage=True,search=False,words=True)],path)
-        self.assertEqual(saved,[dict(host='desk.local',port=28763,enabled=True,usage=True,search=True,words=True)])
+        self.assertEqual(saved,[dict(host='desk.local',port=28763,label='',enabled=True,usage=True,search=True,words=True)])
         self.assertEqual(load_remotes(path),saved)
         with self.assertRaises(ValueError):
             save_remotes([dict(host='x.local',port=0)],path)

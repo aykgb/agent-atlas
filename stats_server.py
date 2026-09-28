@@ -86,9 +86,11 @@ def clean_remotes(entries, strict=False):
         if (host, port) in seen:
             continue
         seen.add((host, port))
+        label = str(entry.get('label') or '').strip()[:60]
         sections = {key: bool(entry.get(key, True)) for key in ('usage', 'search', 'words')}
         sections['search'] = sections['search'] or sections['words']
-        remotes.append({'host': host, 'port': port, 'enabled': bool(entry.get('enabled', True)), **sections})
+        remotes.append({'host': host, 'port': port, 'label': label,
+                        'enabled': bool(entry.get('enabled', True)), **sections})
     return remotes
 
 
