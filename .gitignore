@@ -3,6 +3,7 @@ __pycache__/
 .stats/
 words-exclude.txt
 remotes.json
+local.json
 .opencode/
 .claude/
 .pi

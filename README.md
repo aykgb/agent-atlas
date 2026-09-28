@@ -12,7 +12,15 @@ uv sync
 .venv/bin/python stats_server.py
 ```
 
-打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止，或用 `./server.sh start | stop | restart | status` 后台运行（Windows 用 `server.ps1`，命令相同；PID 与日志都在 `.stats/`）。端口被占用时使用 `--port 18764`。索引构建期间服务 HTTP 尚未监听，start/status 会阻塞到就绪才返回。
+打开 <http://127.0.0.1:18763>。默认只监听本机；Ctrl+C 停止，或用 `./server.sh start | stop | restart | status` 后台运行（Windows 用 `server.ps1`，命令相同；PID 与日志都在 `.stats/`）。索引构建期间服务 HTTP 尚未监听，start/status 会阻塞到就绪才返回。
+
+启动参数（`--port`、`--host`、`--home`、`--allow-host`）可写入仓库根目录 `local.json`（个人配置，不入库，可手工编辑），服务启动时读取，命令行显式参数覆盖它；文件不存在或字段非法时用默认值。服务**每次启动成功后会把这些参数（含生效的 `home`）写回 `local.json`**，所以 `./server.sh start --port 18764` 只需敲一次，之后 `local.json` 就记住了：
+
+```json
+{ "port": 18764, "host": "127.0.0.1", "home": "/home/wangc", "allow_host": ["stats.example.com"] }
+```
+
+`home` 未指定时写为当前用户主目录；它在索引命名上视同默认（仍用 `.stats/index.sqlite`），只有指向别的目录才用带哈希后缀的 `index-*.sqlite`。服务启动时还把实际访问地址写入 `.stats/server.url`（`0.0.0.0`、`::` 归一为 `127.0.0.1`），`server.sh` / `server.ps1` 据此打印与探测地址；端口只在 `local.json` 里、命令行没有时也能对上。
 
 远端经反向代理访问时，用 `--host` 指定监听地址（`0.0.0.0`、局域网或 Tailscale 的 IP），用 `--allow-host` 放行访问用的域名或 IP（可重复；默认已放行 Tailscale 地址 `100.64.216.70`）：
 
@@ -40,7 +48,7 @@ python3 stats-today.py --days 30
 python3 stats-today.py --days 30 --json
 ```
 
-默认显示 agent × 模型明细；多日查询额外显示每日各 agent 总量。JSON 返回日期、agent、模型三个维度聚合。`--url` 指定 server 地址（默认 `http://127.0.0.1:18763`），server 未启动时报错退出。服务支持 `--home /path/to/home` 指定其他日志根目录，索引单独存放（`index-*.sqlite`），不影响默认索引。
+默认显示 agent × 模型明细；多日查询额外显示每日各 agent 总量。JSON 返回日期、agent、模型三个维度聚合。`--url` 指定 server 地址（默认 `http://127.0.0.1:18763`），server 未启动时报错退出。服务支持 `--home /path/to/home` 指定其他日志根目录，索引单独存放（`index-*.sqlite`；等于当前用户主目录时仍用默认索引），不影响默认索引；该参数也可写在 `local.json`。
 
 ## 页面操作
 

@@ -1,3 +1,4 @@
+import hashlib
 import http.client
 import json
 import os
@@ -16,9 +17,10 @@ from urllib.parse import parse_qs, urlsplit
 import stats_data
 from stats_data import Dataset, collect, usage_values
 from stats_server import (AUTO_REFRESH_SECONDS, LOOPBACK, Handler, Server, allowed_hosts, changed_files,
-                          clean_remotes, close_sources, connect, excluded_words, load_remotes, meta_value,
-                          open_sources, period, query, rebuild, remote_path, remote_status, remotes_payload,
-                          save_excluded, save_remotes, sleep_until, sync_remote, update_index)
+                          clean_local, clean_remotes, close_sources, connect, display_url, excluded_words,
+                          index_suffix, load_local, load_remotes, meta_value, open_sources, parse_args, period,
+                          query, rebuild, remote_path, remote_status, remotes_payload, save_excluded,
+                          save_local, save_remotes, sleep_until, sync_remote, update_index)
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -459,6 +461,63 @@ class Contracts(unittest.TestCase):
         self.assertEqual(load_remotes(path),saved)
         (self.home/'broken.json').write_text('{nope',encoding='utf-8')
         self.assertEqual(load_remotes(self.home/'broken.json'),[])
+
+    def test_local_config_cleans_fields_and_ignores_invalid(self):
+        self.assertEqual(clean_local({'port':18764,'host':' 127.0.0.1 ','home':'/tmp/h',
+                                      'allow_host':['a.example',' b.example ','','x',7],'extra':1}),
+                         {'port':18764,'host':'127.0.0.1','home':'/tmp/h',
+                          'allow_host':['a.example','b.example','x']})
+        self.assertEqual(clean_local({'allow_host':'solo.example'}),{'allow_host':['solo.example']})
+        # allow_host 合法但为空时保留空数组（便于把「全部参数」原样写回 local.json）
+        self.assertEqual(clean_local({'allow_host':[1,None]}),{'allow_host':[]})
+        self.assertEqual(clean_local({'allow_host':[]}),{'allow_host':[]})
+        for bad in ({'port':0},{'port':70000},{'port':True},{'port':'18764'},{'host':'  '},
+                    {'home':5},[],'x'):
+            self.assertEqual(clean_local(bad),{})
+        self.assertEqual(display_url('0.0.0.0',18764),'http://127.0.0.1:18764')
+        self.assertEqual(display_url('::1',18764),'http://[::1]:18764')
+        self.assertEqual(display_url('127.0.0.1',18763),'http://127.0.0.1:18763')
+
+    def test_local_config_missing_or_broken_falls_back_to_defaults(self):
+        self.assertEqual(load_local(self.home/'nope.json'),{})
+        path=self.home/'local.json'
+        path.write_text('{nope',encoding='utf-8')
+        self.assertEqual(load_local(path),{})
+        path.write_text('{"port": 18764, "home": "/tmp/h"}',encoding='utf-8')
+        self.assertEqual(load_local(path),{'port':18764,'home':'/tmp/h'})
+
+    def test_local_config_round_trips_through_save(self):
+        path=self.home/'local.json'
+        saved=save_local({'port':18764,'host':'127.0.0.1','home':'/tmp/h',
+                          'allow_host':['a.example']},path)
+        self.assertEqual(saved,{'port':18764,'host':'127.0.0.1','home':'/tmp/h','allow_host':['a.example']})
+        self.assertEqual(load_local(path),saved)
+        self.assertEqual(path.stat().st_mode & 0o777,0o600)
+        # 空 allow_host 也写回，四个键齐全
+        self.assertEqual(save_local({'port':18763,'host':'127.0.0.1','home':'/home/u','allow_host':[]},path),
+                         {'port':18763,'host':'127.0.0.1','home':'/home/u','allow_host':[]})
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8')),
+                         {'port':18763,'host':'127.0.0.1','home':'/home/u','allow_host':[]})
+
+    def test_index_suffix_treats_current_home_as_default(self):
+        current=str(Path.home().resolve())
+        self.assertEqual(index_suffix(None),'')
+        self.assertEqual(index_suffix(current),'')
+        self.assertEqual(index_suffix('/tmp/other'),'-'+hashlib.sha256(b'/tmp/other').hexdigest()[:8])
+        self.assertNotEqual(index_suffix('/tmp/other'),index_suffix('/tmp/another'))
+
+    def test_startup_args_prefer_cli_over_local_config(self):
+        defaults={'port':18764,'host':'0.0.0.0','home':'/tmp/h','allow_host':['cfg.example']}
+        args=parse_args([],defaults)
+        self.assertEqual((args.port,args.host,args.home,args.allow_host,args.reindex),
+                         (18764,'0.0.0.0','/tmp/h',['cfg.example'],False))
+        over=parse_args(['--port','18765','--host','127.0.0.1','--home','/tmp/other',
+                         '--allow-host','cli.example'],defaults)
+        self.assertEqual((over.port,over.host,over.home,over.allow_host),
+                         (18765,'127.0.0.1','/tmp/other',['cli.example']))
+        plain=parse_args([],{})
+        self.assertEqual((plain.port,plain.host,plain.home,plain.allow_host),
+                         (18763,'127.0.0.1',None,[]))
 
     def remote_log(self, home, rows):
         return self.write('.pi/agent/sessions/a.jsonl', rows, home=home)
