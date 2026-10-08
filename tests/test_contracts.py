@@ -735,6 +735,28 @@ class Contracts(unittest.TestCase):
         self.assertEqual(empty['rows'],[])
         self.assertEqual(empty['buckets'],['2026-09-01'])
 
+    def test_model_filter_and_model_list_ignore_case(self):
+        home=self.home/'model-case'
+        home.mkdir()
+        self.remote_log(home,[
+            dict(type='message',id='u1',message=dict(role='user',content='问题')),
+            dict(type='message',id='a1',message=dict(role='assistant',model='Big-Model',content=[dict(type='text',text='答')],usage=dict(input=5,output=1))),
+            dict(type='message',id='u2',message=dict(role='user',content='追问')),
+            dict(type='message',id='a2',message=dict(role='assistant',model='big-model',content=[dict(type='text',text='答')],usage=dict(input=2,output=1))),
+        ])
+        index=self.home/'model-case.sqlite'
+        rebuild(index,home)
+        con=connect(index)
+        self.addCleanup(con.close)
+        # 模型下拉只列一项，取用量最多的写法
+        self.assertEqual(query(con,'/api/meta',{})['models'],['Big-Model'])
+        # 两种写法筛选都命中全部用量；/api/usage 行保留日志里的原始写法
+        for chosen in ('Big-Model','big-model'):
+            rows=query(con,'/api/usage',dict(model=chosen,n='30'))['rows']
+            self.assertEqual(sorted(r['model'] for r in rows),['Big-Model','big-model'])
+            self.assertEqual(sum(r['total'] for r in rows),9)
+            self.assertEqual(query(con,'/api/search',dict(q='答',model=chosen))['total'],2)
+
     def test_http_security_rejects_foreign_hosts_and_origins(self):
         self.assertTrue(fake_handler('127.0.0.1:18763').allowed())
         self.assertTrue(fake_handler('localhost:18763').allowed())

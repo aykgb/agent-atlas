@@ -1,7 +1,9 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const colors = ['#6484d8', '#71b3a2', '#b49acb', '#e2b274', '#de8999', '#87acc8', '#a5b677', '#9299ad'];
-const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: [], sessionPage: 1, session: null, hideAlnum: false};
+const state = {tab: 'usage', page: 1, term: '', usage: null, excluded: [], request: 0, writable: true, remotes: [], sessionPage: 1, session: null, hideAlnum: false, modelNames: new Map()};
+// 模型名大小写不敏感归一：/api/meta 的模型名为准，同一模型的不同写法（如 pi 的 Qwen3.8-Flash-Next-IQ3_S / qwen3.8-flash-next-iq3_s）合并为一项。
+const modelOf = name => state.modelNames.get(name.toLowerCase()) || name;
 const number = n => Number(n || 0).toLocaleString('en-US');
 const syncTime = iso => new Date(iso).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 const compact = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'K' : number(n);
@@ -128,6 +130,7 @@ async function checkFresh() {
 async function metadata(preloaded) {
   const data = preloaded || await api('/api/meta');
   knownVersion = dataVersion(data);
+  state.modelNames = new Map(data.models.map(model => [model.toLowerCase(), model]));
   for (const [id, values, label] of [['agent', data.agents, '全部 agent'], ['model', data.models, '全部模型']]) {
     const selected = $(id).value;
     $(id).innerHTML = '<option value="">' + label + '</option>' + values.map(v => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join('');
@@ -191,8 +194,8 @@ function renderUsage(data) {
   $('cacheDetail').textContent = '读取 ' + compact(sum('cr')) + ' / 写入 ' + compact(sum('cc'));
   const rows = new Map();
   for (const row of data.rows) {
-    const key = row.agent + '\0' + row.model;
-    if (!rows.has(key)) rows.set(key, {...row, new:0,cc:0,cr:0,out:0,msgs:0,total:0});
+    const key = row.agent + '\0' + modelOf(row.model);
+    if (!rows.has(key)) rows.set(key, {...row, model: modelOf(row.model), new:0,cc:0,cr:0,out:0,msgs:0,total:0});
     for (const field of ['new','cc','cr','out','msgs','total']) rows.get(key)[field] += row[field];
   }
   $('usageRows').innerHTML = [...rows.values()].sort((a,b) => b.total-a.total).map(r => '<tr><td><b>' + esc(r.model) + '</b><small>' + esc(r.agent) + '</small></td>' + ['msgs','new','cc','cr','out','total'].map(k => '<td>' + number(r[k]) + '</td>').join('') + '</tr>').join('') || '<tr><td colspan="7">当前范围没有用量记录，请调整时间或筛选。</td></tr>';
@@ -210,7 +213,7 @@ function renderCharts() {
   const data = state.usage;
   if (!data) return;
   const grouping = $('group').value;
-  const keyOf = row => grouping === 'pair' ? row.agent + ' / ' + row.model : row[grouping];
+  const keyOf = row => grouping === 'pair' ? row.agent + ' / ' + modelOf(row.model) : grouping === 'model' ? modelOf(row.model) : row[grouping];
   const totals = new Map();
   for (const row of data.rows) totals.set(keyOf(row), (totals.get(keyOf(row)) || 0) + row.total);
   const ranked = [...totals.entries()].filter(([,v]) => v > 0).sort((a,b) => b[1]-a[1]);

@@ -560,10 +560,13 @@ def bucket(day, unit):
 
 def bounds(params):
     clauses, values = [], []
-    for key in ('agent', 'model'):
-        if params.get(key):
-            clauses.append(f'{key} = ?')
-            values.append(params[key])
+    if params.get('agent'):
+        clauses.append('agent = ?')
+        values.append(params['agent'])
+    if params.get('model'):
+        # 同一模型在不同日志里大小写不一（如 pi 的 Qwen3.8-Flash-Next-IQ3_S / qwen3.8-flash-next-iq3_s），模型筛选不区分大小写
+        clauses.append('lower(model) = lower(?)')
+        values.append(params['model'])
     for key, sign in (('start', '>='), ('end', '<=')):
         if params.get(key):
             date.fromisoformat(params[key])
@@ -575,10 +578,20 @@ def bounds(params):
 def scoped_bounds(params):
     clauses, values = bounds(params)
     if params.get('model'):
-        idx = clauses.index('model = ?')
-        clauses[idx] = "instr(' · ' || model || ' · ', ?) > 0"
+        idx = clauses.index('lower(model) = lower(?)')
+        clauses[idx] = "instr(lower(' · ' || model || ' · '), lower(?)) > 0"
         values[idx] = ' · ' + params['model'] + ' · '
     return clauses, values
+
+
+def merged_models(totals):
+    """模型名按小写归一（同一模型大小写写法不一）；显示名取用量最多的写法。"""
+    display = {}
+    for model, total in totals.items():
+        key = model.lower()
+        if key not in display or total > totals[display[key]]:
+            display[key] = model
+    return sorted(display.values())
 
 
 def positive(params, key, default, maximum):
@@ -667,7 +680,7 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
     if endpoint == '/api/meta':
         result = {r['key']: json.loads(r['value']) for r in con.execute("SELECT * FROM meta WHERE key NOT IN ('version','indexed_at')")}
         turns = sessions = 0
-        models = set()
+        models = defaultdict(int)
         counts = defaultdict(int)
         warnings = list(result.get('warnings') or [])
         for source in sources:
@@ -675,14 +688,15 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 turns += source.con.execute('SELECT count(*) FROM turns').fetchone()[0]
                 sessions += source.con.execute('SELECT count(*) FROM (SELECT DISTINCT agent,session FROM turns)').fetchone()[0]
             if source.usage:
-                models.update(r[0] for r in source.con.execute('SELECT DISTINCT model FROM usage'))
+                for model, total in source.con.execute('SELECT model,new+cc+cr+out FROM usage'):
+                    models[model] += total
             for agent, count in (meta_value(source.con, 'sources') or {}).items():
                 counts[agent] += count
             if source.key != 'local':
                 error = meta_value(source.con, 'sync_error')
                 if error:
                     warnings.append(f'远端 {source.label} 同步失败：{error}')
-        result.update(turns=turns, sessions=sessions, models=sorted(models),
+        result.update(turns=turns, sessions=sessions, models=merged_models(models),
                       sources=dict(counts), warnings=warnings, writable=writable)
         return result
     if endpoint == '/api/export':

@@ -16,7 +16,7 @@
 | 10 | 远端数据独立存放 + cursor/指纹增量同步 + 启停不删数据 | — | ✅ | 0f4b287、ead14c5 |
 | 11 | 刷新改增量（水位 + size）、远端面板每台独立启停 | — | ✅ | 0f4b287 |
 | 12 | 控制脚本未就绪则阻塞到就绪（server.sh / server.ps1） | P2 | ✅ | [server-wait-ready.md](docs/tasks/server-wait-ready.md) |
-| 13 | 用量概览：Agent 与模型使用排名 | P2 | ✅ | [usage-rankings.md](docs/tasks/usage-rankings.md)：CDP 冒烟通过 |
+| 13 | 用量概览：Agent 与模型使用排名 | P2 | ✅ | [usage-rankings.md](docs/tasks/usage-rankings.md)：CDP 冒烟通过；模型名大小写合并已扩到明细/趋势/占比与筛选（契约 45 项） |
 | 14 | 已打开页面自动更新（轮询 meta + 自动检查按挂钟计时） | P1 | ✅ | [auto-refresh-page.md](docs/tasks/auto-refresh-page.md)：CDP 冒烟通过 |
 | 15 | 会话详情：Agent 响应统一折叠、段落按原顺序排列 | P1 | ✅ | [turn-output-grouping.md](docs/tasks/turn-output-grouping.md)：CDP 冒烟通过 |
 | 16 | 会话列表 tab + 完整会话查看 + 搜索结果跳转 | P1 | ✅ | [session-list.md](docs/tasks/session-list.md)：CDP 冒烟通过 |
