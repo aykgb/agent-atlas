@@ -113,6 +113,28 @@ class Contracts(unittest.TestCase):
         self.assertEqual(d.turns[0]['model'],'model-a · model-b')
         self.assertEqual([p['kind'] for p in d.turns[0]['output']],['工具调用','工具结果','正文'])
 
+    def test_omp_output_includes_thinking_and_dedupes_by_message(self):
+        path=self.write('.omp/agent/sessions/slug/2026-01-01T00-00-00-000Z_sid.jsonl',[
+            dict(type='session',version=3,id='sid',cwd='/x'),
+            dict(type='model_change',id='mc',model='provider/model-a'),
+            dict(type='message',id='u',message=dict(role='user',content=[dict(type='text',text='统计')])),
+            dict(type='message',id='a',message=dict(role='assistant',provider='provider',model='model-a',
+                 content=[dict(type='thinking',thinking='想'),dict(type='toolCall',name='read',arguments={})],
+                 usage=dict(input=20,cacheWrite=3,cacheRead=40,output=7,totalTokens=70))),
+            dict(type='message',id='t',message=dict(role='toolResult',content=[dict(type='text',text='工具输出')])),
+            dict(type='message',id='b',message=dict(role='assistant',provider='provider',model='model-a',
+                 content=[dict(type='text',text='结论')],usage=dict(input=20,cacheWrite=3,cacheRead=40,output=9,totalTokens=72))),
+            dict(type='message',id='b',message=dict(role='assistant',provider='provider',model='model-a',
+                 content=[],usage=dict(input=20,cacheWrite=3,cacheRead=40,output=99,totalTokens=162))),
+        ])
+        d=Dataset()
+        d.read_file('omp',path)
+        self.assertEqual(len(d.turns),1)
+        self.assertEqual([p['kind'] for p in d.turns[0]['output']],['思考','工具调用','工具结果','正文'])
+        self.assertEqual(d.turns[0]['model'],'model-a')  # model_change 的 provider/model 全名不混入轮次
+        self.assertEqual([u['out'] for u in d.usage],[7,9])  # 同 id 的重复消息只计一次
+        self.assertEqual((d.usage[0]['new'],d.usage[0]['cc'],d.usage[0]['cr'],d.usage[0]['msgs']),(20,3,40,1))
+
     def test_opencode_reads_messages_and_parts_without_writing_source(self):
         db=self.home/'.local/share/opencode/opencode.db'
         db.parent.mkdir(parents=True)
@@ -502,7 +524,7 @@ class Contracts(unittest.TestCase):
 
     def test_index_suffix_keys_by_resolved_home(self):
         current=str(Path.home().resolve())
-        expected=lambda path:'-'+hashlib.sha256(path.encode()).hexdigest()[:8]
+        expected=lambda path:'-'+hashlib.sha256(str(Path(path).resolve()).encode()).hexdigest()[:8]
         self.assertEqual(index_suffix(None),expected(current))
         self.assertEqual(index_suffix(current),expected(current))
         self.assertEqual(index_suffix('/tmp/other'),expected('/tmp/other'))
@@ -685,7 +707,7 @@ class Contracts(unittest.TestCase):
         meta=query(con,'/api/meta',{},sources=sources)
         self.assertEqual(meta['turns'],2)
         self.assertEqual(meta['sessions'],2)
-        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'),sources=sources)['rows']),13)
+        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(start=TS[:10],end=TS[:10]),sources=sources)['rows']),13)
         terms={w['term'] for w in query(con,'/api/words',dict(limit='100'),sources=sources)['words']}
         self.assertIn('localword',terms)
         self.assertIn('remoteword',terms)
@@ -709,7 +731,7 @@ class Contracts(unittest.TestCase):
         limited=open_sources(con,load_remotes(config),directory)
         self.addCleanup(lambda: close_sources(limited))
         self.assertEqual(query(con,'/api/meta',{},sources=limited)['turns'],1)
-        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(n='30'),sources=limited)['rows']),13)
+        self.assertEqual(sum(r['total'] for r in query(con,'/api/usage',dict(start=TS[:10],end=TS[:10]),sources=limited)['rows']),13)
 
     def test_usage_honors_explicit_start_end_over_n(self):
         home=self.home/'usage-range'
@@ -752,7 +774,7 @@ class Contracts(unittest.TestCase):
         self.assertEqual(query(con,'/api/meta',{})['models'],['Big-Model'])
         # 两种写法筛选都命中全部用量；/api/usage 行保留日志里的原始写法
         for chosen in ('Big-Model','big-model'):
-            rows=query(con,'/api/usage',dict(model=chosen,n='30'))['rows']
+            rows=query(con,'/api/usage',dict(model=chosen,start=TS[:10],end=TS[:10]))['rows']
             self.assertEqual(sorted(r['model'] for r in rows),['Big-Model','big-model'])
             self.assertEqual(sum(r['total'] for r in rows),9)
             self.assertEqual(query(con,'/api/search',dict(q='答',model=chosen))['total'],2)

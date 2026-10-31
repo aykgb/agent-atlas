@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok', 'dsh')
+TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok', 'dsh', 'omp')
 ZSTD = shutil.which('zstd')
 DSH_VERSION_RE = re.compile(r'\.v(\d+)\.jsonl\.zstd$')
 FIELDS = ('new', 'cc', 'cr', 'out', 'msgs')
@@ -153,6 +153,9 @@ def usage_values(agent, u):
         return [u.get(k, 0) or 0 for k in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens', 'output_tokens')] + [1]
     if agent == 'pi':
         return [u.get('input', 0), u.get('cacheWrite', 0), u.get('cacheRead', 0), u.get('output', 0) + u.get('reasoning', 0), 1]
+    if agent == 'omp':
+        # omp 的 usage 无 reasoning 项，output 已含思考（totalTokens = 四项之和，实测可验证）。
+        return [u.get('input', 0), u.get('cacheWrite', 0), u.get('cacheRead', 0), u.get('output', 0), 1]
     if agent == 'opencode':
         cache = u.get('cache') or {}
         return [u.get('input', 0), cache.get('write', 0), cache.get('read', 0), u.get('output', 0) + u.get('reasoning', 0), 1]
@@ -240,7 +243,7 @@ class Dataset:
         prompt_index = None
         for index, d in enumerate(records):
             typ, ts = d.get('type'), d.get('timestamp')
-            if agent in ('claude', 'pi'):
+            if agent in ('claude', 'pi', 'omp'):
                 m = d.get('message') or {}
                 if typ == 'model_change':
                     model = d.get('modelId') or model
@@ -459,7 +462,7 @@ def discover(home=None):
     root = Path(home or Path.home()).resolve()
     patterns = {'claude': '.claude/projects/**/*.jsonl', 'codex': '.codex/sessions/**/*.jsonl',
                 'pi': '.pi/agent/sessions/**/*.jsonl', 'grok': '.grok/sessions/**/updates.jsonl',
-                'dsh': '.dsh/sessions/*/session*/*.jsonl.zstd'}
+                'dsh': '.dsh/sessions/*/session*/*.jsonl.zstd', 'omp': '.omp/agent/sessions/**/*.jsonl'}
     found = []
     for agent, pattern in patterns.items():
         paths = set(root.glob(pattern))

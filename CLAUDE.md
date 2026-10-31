@@ -1,11 +1,11 @@
 # CLAUDE.md
 
-统计本机六类 agent（Claude、Codex、Pi、OpenCode、Grok、dsh）的 token 用量：Python 标准库 + jieba 后端，原生 JavaScript + SVG 前端，SQLite FTS5 索引。
+统计本机七类 agent（Claude、Codex、Pi、OpenCode、Grok、dsh、OMP）的 token 用量：Python 标准库 + jieba 后端，原生 JavaScript + SVG 前端，SQLite FTS5 索引。
 
 ## Project map
 
 - `stats_server.py` — HTTP 服务，默认 127.0.0.1:18763；建索引与查询；启动参数可由 `local.json` 提供
-- `stats_data.py` — 日志解析、去重与聚合（六类 agent 日志）
+- `stats_data.py` — 日志解析、去重与聚合（七类 agent 日志）
 - `stats-today.py` — CLI，从 server `/api/usage` 读取（含远端），需服务运行；`--url` 指定地址
 - `server.sh` / `server.ps1` — 服务控制：start / stop / restart / status（macOS / Windows），PID 与日志存于 .stats/
 - `static/` — 前端：index.html、app.js、style.css

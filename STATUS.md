@@ -31,5 +31,6 @@
 | 25 | local.json 本机启动参数（读写：CLI 优先，启动后写回；索引统一按 home 命名） | P2 | ✅ | [local-json-config.md](docs/tasks/local-json-config.md)：契约44项+`sh -n`+node 检查通过，写回实测；与任务 24 统一为 `index-<hash>.sqlite` |
 | 26 | 远端面板：主机名可点开远端页面、「同步」列对齐 | P3 | ✅ | [remote-row-actions.md](docs/tasks/remote-row-actions.md)：node 检查通过，无头截图 4 行对齐、链接 underline 实测 |
 | 27 | 远端主机备注名（label，可空） | P3 | ✅ | [remote-host-label.md](docs/tasks/remote-host-label.md)：契约43项+node检查通过，无头截图实测 |
+| 28 | OMP 第七类 agent：解析 .omp/agent/sessions 并入索引 | P2 | ✅ | [omp-sessions.md](docs/tasks/omp-sessions.md)：契约46项+node检查通过；实测 sources omp=4、页面筛选与排名可见；另修 3 项既有失败测试（写死日期窗口×2、/tmp 符号链接哈希×1） |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。
