@@ -32,5 +32,6 @@
 | 26 | 远端面板：主机名可点开远端页面、「同步」列对齐 | P3 | ✅ | [remote-row-actions.md](docs/tasks/remote-row-actions.md)：node 检查通过，无头截图 4 行对齐、链接 underline 实测 |
 | 27 | 远端主机备注名（label，可空） | P3 | ✅ | [remote-host-label.md](docs/tasks/remote-host-label.md)：契约43项+node检查通过，无头截图实测 |
 | 28 | OMP 第七类 agent：解析 .omp/agent/sessions 并入索引 | P2 | ✅ | [omp-sessions.md](docs/tasks/omp-sessions.md)：契约46项+node检查通过；实测 sources omp=4、页面筛选与排名可见；另修 3 项既有失败测试（写死日期窗口×2、/tmp 符号链接哈希×1） |
+| 29 | agy（Antigravity CLI）第八类 agent：转录 + protobuf 模型名 | P2 | ✅ | [agy-sessions.md](docs/tasks/agy-sessions.md)：契约48项（1 skip：无 zstd）+node 检查通过；服务重启并刷新后 agents/sources 含 agy、两个会话可打开；另按平台跳过 local.json 权限位断言 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。

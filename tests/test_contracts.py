@@ -27,6 +27,20 @@ TS = '2026-09-18T12:00:00+08:00'
 DSH_TIME = 1789800000000
 
 
+def pb_varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        out.append(byte | (0x80 if value else 0))
+        if not value:
+            return bytes(out)
+
+
+def pb_bytes(number, payload):
+    return pb_varint(number << 3 | 2) + pb_varint(len(payload)) + payload
+
+
 def fake_handler(host, origin=None, names=None, client='127.0.0.1', forwarded=None):
     handler = object.__new__(Handler)
     handler.server = type('Server', (), {'server_port': 18763, 'allowed_names': set(names or allowed_hosts())})()
@@ -134,6 +148,60 @@ class Contracts(unittest.TestCase):
         self.assertEqual(d.turns[0]['model'],'model-a')  # model_change 的 provider/model 全名不混入轮次
         self.assertEqual([u['out'] for u in d.usage],[7,9])  # 同 id 的重复消息只计一次
         self.assertEqual((d.usage[0]['new'],d.usage[0]['cc'],d.usage[0]['cr'],d.usage[0]['msgs']),(20,3,40,1))
+
+    def test_agy_reads_transcript_model_protobuf_and_checkpoint(self):
+        session='agy-session'
+        path=self.write(f'.gemini/antigravity-cli/brain/{session}/.system_generated/logs/transcript.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:00:00Z',
+                 content='<USER_REQUEST>\n统计 AGYWORD\n</USER_REQUEST>\n'
+                         '<ADDITIONAL_METADATA>\nSECRETCTX\n</ADDITIONAL_METADATA>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:01Z',
+                 input_tokens=100,cache_read_tokens=20,output_tokens=10,
+                 thinking='想',tool_calls=[dict(name='read_file',args=dict(path='x'))]),
+            dict(step_index=2,source='MODEL',type='GENERIC',created_at='2026-09-18T12:00:02Z',
+                 content='工具输出'),
+            dict(step_index=3,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:03Z',
+                 input_tokens=50,cache_read_tokens=110,output_tokens=5,content='结论'),
+            dict(step_index=4,source='SYSTEM',type='CHECKPOINT',created_at='2026-09-18T12:00:04Z',
+                 input_tokens=7,output_tokens=3,content='压缩摘要'),
+            dict(step_index=5,source='SYSTEM',type='SYSTEM_MESSAGE',created_at='2026-09-18T12:00:05Z',
+                 content='系统提示'),
+            # 同 step 重复出现：按 (step, 类型) 只计一次，不能被 MAX 抬成 999。
+            dict(step_index=3,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:03Z',
+                 input_tokens=999,cache_read_tokens=999,output_tokens=999,content='重复'),
+        ])
+        db=self.home/f'.gemini/antigravity-cli/conversations/{session}.db'
+        db.parent.mkdir(parents=True)
+        con=sqlite3.connect(db)
+        con.execute('CREATE TABLE gen_metadata(idx INTEGER,data BLOB,size INTEGER)')
+        con.executemany('INSERT INTO gen_metadata VALUES(?,?,?)',[
+            (0,pb_bytes(2,pb_varint(1))+pb_bytes(1,pb_bytes(19,b'model-a')),0),
+            (1,pb_bytes(2,pb_varint(3))+pb_bytes(1,pb_bytes(19,b'model-b')),0),
+        ])
+        con.commit(); con.close()
+        d=Dataset()
+        d.read_file('agy',path)
+        self.assertEqual([(u['model'],u['new'],u['cc'],u['cr'],u['out'],u['msgs']) for u in d.usage],
+                         [('model-a',100,0,20,10,1),('model-b',50,0,110,5,1),('model-b',7,0,0,3,1)])
+        self.assertEqual([t['input'] for t in d.turns],['统计 AGYWORD','压缩摘要'])
+        self.assertEqual([p['kind'] for p in d.turns[0]['output']],['思考','工具调用','工具结果','正文'])
+        self.assertTrue(d.turns[0]['output'][1]['text'].startswith('read_file'))
+        self.assertEqual(d.turns[0]['model'],'model-a · model-b')
+        self.assertFalse(d.turns[1].get('words',True))
+        self.assertEqual(d.sources['agy'],1)
+        self.assertEqual(collect(self.home).sources['agy'],1)
+
+    def test_agy_missing_model_db_still_reads_usage(self):
+        path=self.write('.gemini/antigravity-cli/brain/no-db/.system_generated/logs/transcript.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:00:00Z',
+                 content='<USER_REQUEST>问</USER_REQUEST>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:01Z',
+                 input_tokens=3,output_tokens=2,content='答'),
+        ])
+        d=Dataset()
+        d.read_file('agy',path)
+        self.assertEqual([(u['model'],u['new'],u['out']) for u in d.usage],[('unknown',3,2)])
+        self.assertEqual([t['input'] for t in d.turns],['问'])
 
     def test_opencode_reads_messages_and_parts_without_writing_source(self):
         db=self.home/'.local/share/opencode/opencode.db'
@@ -515,7 +583,8 @@ class Contracts(unittest.TestCase):
                           'allow_host':['a.example']},path)
         self.assertEqual(saved,{'port':18764,'host':'127.0.0.1','home':'/tmp/h','allow_host':['a.example']})
         self.assertEqual(load_local(path),saved)
-        self.assertEqual(path.stat().st_mode & 0o777,0o600)
+        if os.name != 'nt':  # Windows 不保留 POSIX 权限位，chmod 只切换只读
+            self.assertEqual(path.stat().st_mode & 0o777,0o600)
         # 空 allow_host 也写回，四个键齐全
         self.assertEqual(save_local({'port':18763,'host':'127.0.0.1','home':'/home/u','allow_host':[]},path),
                          {'port':18763,'host':'127.0.0.1','home':'/home/u','allow_host':[]})

@@ -1,11 +1,11 @@
 # CLAUDE.md
 
-统计本机七类 agent（Claude、Codex、Pi、OpenCode、Grok、dsh、OMP）的 token 用量：Python 标准库 + jieba 后端，原生 JavaScript + SVG 前端，SQLite FTS5 索引。
+统计本机八类 agent（Claude、Codex、Pi、OpenCode、Grok、dsh、OMP、agy）的 token 用量：Python 标准库 + jieba 后端，原生 JavaScript + SVG 前端，SQLite FTS5 索引。
 
 ## Project map
 
 - `stats_server.py` — HTTP 服务，默认 127.0.0.1:18763；建索引与查询；启动参数可由 `local.json` 提供
-- `stats_data.py` — 日志解析、去重与聚合（七类 agent 日志）
+- `stats_data.py` — 日志解析、去重与聚合（八类 agent 日志）
 - `stats-today.py` — CLI，从 server `/api/usage` 读取（含远端），需服务运行；`--url` 指定地址
 - `server.sh` / `server.ps1` — 服务控制：start / stop / restart / status（macOS / Windows），PID 与日志存于 .stats/
 - `static/` — 前端：index.html、app.js、style.css
@@ -43,6 +43,7 @@
 <important if="you are modifying log parsing, dedup, or aggregation logic">
 - README「数据来源与口径」一节是规格，tests/ 是它的可执行版本；改动时同步更新 README 与测试。
 - dsh 的 `inputTokens` 不含缓存读取、`outputTokens` 已含思考；注入消息并入当前轮「上下文」段、压缩摘要单独成轮，都不计词频。
+- agy 的转录不带模型名：模型从同会话 `conversations/<id>.db` 的 `gen_metadata` protobuf 解出（`2`=step 范围，`1.19`=模型 key）；`CHECKPOINT` 没有 gen 行，沿用当前模型。
 </important>
 
 <important if="you are about to commit">

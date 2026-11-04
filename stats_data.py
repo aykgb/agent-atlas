@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok', 'dsh', 'omp')
+TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok', 'dsh', 'omp', 'agy')
 ZSTD = shutil.which('zstd')
 DSH_VERSION_RE = re.compile(r'\.v(\d+)\.jsonl\.zstd$')
 FIELDS = ('new', 'cc', 'cr', 'out', 'msgs')
@@ -20,6 +20,7 @@ GENERATED_RE = re.compile(r'\s*<(?:' + '|'.join(GENERATED) + r')(?:\s[^>]*)?>'
                           r'|\s*## Referenced chats with Codex:'
                           r'|\s*## Code review guidelines:'
                           r'|\s*\[idle-notify:')
+AGY_REQUEST_RE = re.compile(r'<USER_REQUEST>(.*?)</USER_REQUEST>', re.S)
 COMMENT_RE = re.compile(r'\s*<!--.*?-->', re.S)
 COMMAND_NAME_RE = re.compile(r'<command-name>(.*?)</command-name>', re.S)
 COMMAND_MESSAGE_RE = re.compile(r'<command-message>(.*?)</command-message>', re.S)
@@ -86,6 +87,82 @@ def clean_input(value):
 
 def machine_input(value):
     return bool(GENERATED_RE.match(value))
+
+
+def agy_input(value):
+    match = AGY_REQUEST_RE.search(value)
+    return (match.group(1) if match else value).strip()
+
+
+def agy_usage(record):
+    return {'input': record.get('input_tokens') or 0,
+            'cache_read': record.get('cache_read_tokens') or 0,
+            'output': record.get('output_tokens') or 0}
+
+
+def pb_varint(raw, index):
+    value = shift = 0
+    while index < len(raw):
+        byte = raw[index]
+        index += 1
+        value |= (byte & 0x7F) << shift
+        shift += 7
+        if byte < 0x80:
+            return value, index
+    raise ValueError('protobuf 变长整数被截断')
+
+
+def pb_fields(raw):
+    index, result = 0, []
+    while index < len(raw):
+        key, index = pb_varint(raw, index)
+        number, wire = key >> 3, key & 7
+        if wire == 0:
+            value, index = pb_varint(raw, index)
+        elif wire in (1, 5):
+            size = 8 if wire == 1 else 4
+            if index + size > len(raw):
+                raise ValueError('protobuf 字段被截断')
+            value, index = raw[index:index + size], index + size
+        elif wire == 2:
+            size, index = pb_varint(raw, index)
+            if index + size > len(raw):
+                raise ValueError('protobuf 字段被截断')
+            value, index = raw[index:index + size], index + size
+        else:
+            raise ValueError(f'未知 protobuf wire type {wire}')
+        result.append((number, wire, value))
+    return result
+
+
+def pb_value(raw, number):
+    for field, wire, value in pb_fields(raw):
+        if field == number and wire == 2:
+            return value
+    return b''
+
+
+def agy_models(path):
+    """转录不带模型名，从同会话 SQLite 的 gen_metadata 解出 step→模型。"""
+    db = path.parents[4] / 'conversations' / (path.parents[2].name + '.db')
+    models = {}
+    try:
+        con = sqlite3.connect(db.as_uri() + '?mode=ro', uri=True)
+        try:
+            rows = con.execute('SELECT data FROM gen_metadata').fetchall()
+        finally:
+            con.close()
+    except (OSError, sqlite3.Error):
+        return models
+    for (raw,) in rows:
+        try:
+            step, _ = pb_varint(pb_value(raw, 2), 0)
+            model = pb_value(pb_value(raw, 1), 19).decode('utf-8', 'replace')
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if model:
+            models[step] = model
+    return models
 
 
 def text_of(value):
@@ -165,6 +242,8 @@ def usage_values(agent, u):
     if agent == 'dsh':
         # dsh 的 inputTokens 不含缓存读取，outputTokens 已含思考（totalTokens 可验证）。
         return [u.get('inputTokens', 0), 0, u.get('cacheReadTokens', 0), u.get('outputTokens', 0), 1]
+    if agent == 'agy':
+        return [u.get('input', 0), 0, u.get('cache_read', 0), u.get('output', 0), 1]
     cr, cc = u.get('cached_input_tokens', 0), u.get('cache_write_input_tokens', 0)
     # Codex output_tokens includes reasoning; total_tokens confirms that boundary.
     return [max(u.get('input_tokens', 0) - cr - cc, 0), cc, cr, u.get('output_tokens', 0), 1]
@@ -199,10 +278,14 @@ class Dataset:
     def read_file(self, agent, path):
         records = list(read_jsonl(path, self.warnings))
         self.sources[agent] += 1
-        session = path.parent.name if agent in ('grok', 'dsh') else path.stem
+        if agent == 'agy':
+            session = path.parents[2].name
+        else:
+            session = path.parent.name if agent in ('grok', 'dsh') else path.stem
         generated = path.parent.name == 'subagents'
         current = None
         model = 'unknown'
+        models = agy_models(path) if agent == 'agy' else {}
         previous_total = None
         seen_messages = set()
         precise_turns = {(d.get('payload') or {}).get('turn_id') for d in records if d.get('type') == 'token_usage_record'}
@@ -375,6 +458,46 @@ class Dataset:
                     for name, values in (usage.get('modelUsage') or {model: usage}).items():
                         self.add_usage(agent, session, name, ts, values, (identity, name))
                     prompt_index = None
+            elif agent == 'agy':
+                step = d.get('step_index')
+                identity = (step, typ)
+                if identity in seen_messages:
+                    continue
+                seen_messages.add(identity)
+                ts = d.get('created_at')
+                if typ == 'USER_INPUT':
+                    user(agy_input(text_of(d.get('content'))), ts, step,
+                         words=d.get('source') == 'USER_EXPLICIT')
+                elif typ == 'CHECKPOINT':
+                    summary = text_of(d.get('content'))
+                    if summary:
+                        user(summary, ts, f'compact:{step}', words=False)
+                    if 'input_tokens' in d:
+                        self.add_usage(agent, session, models.get(step) or model, ts,
+                                       agy_usage(d), f'{session}:{step}')
+                elif typ == 'PLANNER_RESPONSE':
+                    model = models.get(step) or model
+                    parts = []
+                    if text_of(d.get('thinking')):
+                        parts.append({'kind': '思考', 'text': text_of(d.get('thinking'))})
+                    for call in d.get('tool_calls') or []:
+                        if not isinstance(call, dict):
+                            continue
+                        arguments = call.get('args', call.get('arguments', {}))
+                        if isinstance(arguments, str):
+                            try:
+                                arguments = json.loads(arguments)
+                            except ValueError:
+                                pass
+                        parts.append({'kind': '工具调用', 'text': call.get('name', '') + '\n' +
+                                      json.dumps(arguments, ensure_ascii=False, indent=2)})
+                    if text_of(d.get('content')):
+                        parts.append({'kind': '正文', 'text': text_of(d.get('content'))})
+                    output(parts)
+                    if 'input_tokens' in d:
+                        self.add_usage(agent, session, model, ts, agy_usage(d), f'{session}:{step}')
+                elif typ == 'GENERIC' and text_of(d.get('content')):
+                    output([{'kind': '工具结果', 'text': text_of(d.get('content'))}])
         self.turns = [t for t in self.turns if not (t.get('command') and not t['output'])]
 
     def read_opencode(self, path):
@@ -462,7 +585,8 @@ def discover(home=None):
     root = Path(home or Path.home()).resolve()
     patterns = {'claude': '.claude/projects/**/*.jsonl', 'codex': '.codex/sessions/**/*.jsonl',
                 'pi': '.pi/agent/sessions/**/*.jsonl', 'grok': '.grok/sessions/**/updates.jsonl',
-                'dsh': '.dsh/sessions/*/session*/*.jsonl.zstd', 'omp': '.omp/agent/sessions/**/*.jsonl'}
+                'dsh': '.dsh/sessions/*/session*/*.jsonl.zstd', 'omp': '.omp/agent/sessions/**/*.jsonl',
+                'agy': '.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript.jsonl'}
     found = []
     for agent, pattern in patterns.items():
         paths = set(root.glob(pattern))
