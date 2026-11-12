@@ -765,11 +765,7 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
         for source in sources:
             if not source.words:
                 continue
-            clauses, values = bounds(p)
-            if p.get('model'):
-                idx = clauses.index('model = ?')
-                clauses[idx] = "instr(' · ' || model || ' · ', ?) > 0"
-                values[idx] = ' · ' + p['model'] + ' · '
+            clauses, values = scoped_bounds(p)
             if exclude:
                 clauses.append('term NOT IN (' + ','.join('?' * len(exclude)) + ')')
                 values.extend(exclude)

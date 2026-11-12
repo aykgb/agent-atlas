@@ -424,6 +424,22 @@ class Contracts(unittest.TestCase):
         both={w['term'] for w in query(con,'/api/words',dict(limit='100',hide_digits='1',hide_english='1'))['words']}
         self.assertEqual(both,{'北京'})
 
+    def test_words_filtered_by_model_case_insensitively(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='model_change',modelId='TestModel'),
+            dict(type='message',id='u1',message=dict(role='user',content='alpha alpha beta')),
+        ])
+        self.write('.pi/agent/sessions/b.jsonl',[
+            dict(type='model_change',modelId='OtherModel'),
+            dict(type='message',id='u2',message=dict(role='user',content='gamma gamma')),
+        ])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        terms={w['term']:w['count'] for w in query(con,'/api/words',dict(limit='100',model='testmodel'))['words']}
+        self.assertEqual(terms,{'alpha':2,'beta':1})
+
     def test_index_is_opened_read_only(self):
         missing=self.home/'index.sqlite'
         with self.assertRaises(sqlite3.Error):
