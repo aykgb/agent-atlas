@@ -19,6 +19,8 @@
 - `words-exclude.txt` — 词频排除词（运行时生成，不入库）
 - `.stats/` — 派生索引（按日志根目录命名的本机 index-*.sqlite、每台远端 remote-*.sqlite）、实际访问地址 server.url 与服务 PID/日志，可删，下次启动自动重建（远端需重新同步）
 
+## 命令与验证
+
 <important if="you need to run commands to install, start, or verify">
 
 | 命令 | 用途 |
@@ -35,52 +37,78 @@
 
 </important>
 
+## 开发流程
+
+### 任务文档先行
+
 <important if="you are adding a feature or changing behavior">
-- 先写任务文档到 `docs/tasks/`，并在 `STATUS.md` 表格登记（状态留空），再写代码；完成后把该行状态改为 ✅。
+- 新功能先写任务文档到 `docs/tasks/`，在 `STATUS.md` 表格登记一行（状态留空），再动代码；任务完成时把该行状态改为 ✅。
 - Bug 修复与任务文档范围内的重构直接做，不新建任务文档。
 </important>
 
-<important if="you are modifying log parsing, dedup, or aggregation logic">
-- README「数据来源与口径」一节是规格，tests/ 是它的可执行版本；改动时同步更新 README 与测试。
-- dsh 的 `inputTokens` 不含缓存读取、`outputTokens` 已含思考；注入消息并入当前轮「上下文」段、压缩摘要单独成轮，都不计词频。
-- agy 的转录不带模型名：模型从同会话 `conversations/<id>.db` 的 `gen_metadata` protobuf 解出（`2`=step 范围，`1.19`=模型 key）；`CHECKPOINT` 没有 gen 行，沿用当前模型。
-</important>
-
-<important if="you are about to commit">
-- 先运行 README「验证」一节的两条命令（测试 + node --check），全部通过。
-- 提交内容不含本地 agent session 数据（.stats/ 索引、words-exclude.txt、remotes.json、local.json、日志原文）；测试夹具只用合成内容。
-</important>
+### 依赖白名单
 
 <important if="you are adding dependencies or frontend resources">
-- Python 侧仅标准库与 jieba；前端为原生 JavaScript + SVG，不引入 npm 或第三方网页资源。
-- dsh 会话经系统 `zstd` 命令解压（外部命令，不算 Python 依赖）；缺失时跳过 dsh 并在页脚提示，不报错。
+- Python 侧只有标准库与 jieba，前端只有原生 JavaScript + SVG；不加 npm 依赖与第三方网页资源。
+- 唯一例外是调用系统 `zstd` 命令解压 dsh 会话（外部命令，不算 Python 依赖）：缺失时跳过 dsh 并在页脚提示，不报错。
 </important>
+
+### 提交前
+
+<important if="you are about to commit">
+- 先跑「命令与验证」的测试与前端语法检查两条命令，全部通过。
+- 提交内容不含本机数据：`.stats/`、`remotes.json`、`local.json`、`words-exclude.txt` 与 agent 日志原文；测试夹具只用合成内容。
+</important>
+
+## 日志数据（stats_data.py）
+
+### 日志只读
+
+<important if="you are reading or writing agent logs or the index">
+- agent 日志一律只读，写入只发生在 `.stats/` 索引。
+</important>
+
+### 解析与聚合口径
+
+<important if="you are modifying log parsing, dedup, or aggregation logic">
+- README「数据来源与口径」是规格，tests/ 是它的可执行版本；改逻辑同时改这两处。
+- dsh：`inputTokens` 不含缓存读取，`outputTokens` 已含思考；注入消息并入当前轮「上下文」段、压缩摘要单独成轮，两者都不计词频。
+- agy：转录不带模型名，模型从同会话 `conversations/<id>.db` 的 `gen_metadata` protobuf 解出（`2`=step 范围，`1.19`=模型 key）；`CHECKPOINT` 没有 gen 行，沿用当前模型。
+</important>
+
+## 服务端（stats_server.py）
+
+### 启动配置
+
+<important if="you are modifying startup config (local.json, argparse defaults)">
+- `local.json`（仓库根目录，gitignore）提供本机启动参数默认值：`port`、`host`、`home`、`allow_host`；命令行显式参数优先，字段非法或文件缺失用内置默认。
+- 服务启动成功（已监听）后把生效的四个参数写回 `local.json`（`home` 未指定时写当前用户主目录），写失败不影响服务；`--reindex` 不写回。
+- `home` 参与索引文件命名，换 `home` 即换一套索引（命名规则见「本机索引与刷新」）。
+- 服务把实际访问地址写入 `.stats/server.url`，`server.sh` / `server.ps1` 优先据此推导地址，缺失时回退命令行解析。
+</important>
+
+### 网络与访问边界
 
 <important if="you are modifying the network layer of stats_server.py (binding, headers, routing)">
 - 默认仅监听 127.0.0.1；开放监听与远端 Host 须经 `--allow-host` 放行名单（默认含 100.64.216.70），Host/Origin 校验始终生效（tests 已固定）。
 - 写操作（POST）仅限本机：客户端地址、Host 与代理转发头均须为回环。
 </important>
 
-<important if="you are modifying remote import (remotes.json, /api/export, sync_remote)">
-- 本机索引只含本机数据；每台远端一个 `.stats/remote-*.sqlite`。停用只在查询时排除、不删数据；移除才删文件。
-- 汇入由本地服务主动 GET 远端 `/api/export`；按 cursor + 轮次指纹增量，远端重建时自动全量重拉；失败整事务回滚并记入该远端库的 `sync_error`。
-- 查询时合并本机与启用中的远端（用量/会话/词频按勾选）；轮次 id 形如 `<key>:<id>`，详情按前缀路由。
-- `remotes.json` 是本地个人配置（gitignore）；POST /api/remotes、/api/sync 与其它写操作一样仅限本机。
-- 勾选 words 隐含 search：词频轮次必须可搜索、可打开。
-</important>
-
-<important if="you are modifying startup config (local.json, argparse defaults)">
-- `local.json`（仓库根目录，gitignore）提供本机启动参数默认值：`port`、`host`、`home`、`allow_host`；命令行显式参数优先，字段非法或文件缺失用内置默认。
-- 服务启动成功（已监听）后把生效的四个参数写回 `local.json`（`home` 未指定时写当前用户主目录），写失败不影响服务；`--reindex` 不写回。
-- 索引命名：索引文件按解析后的 `home`（未指定为当前用户主目录）取 8 位哈希，形如 `index-<哈希>.sqlite`（`index_suffix`），不同日志根目录各自独立；服务把实际访问地址写入 `.stats/server.url`，`server.sh` / `server.ps1` 优先据此推导地址，缺失时回退命令行解析。
-</important>
+### 本机索引与刷新
 
 <important if="you are modifying the local index or refresh (rebuild, update_index)">
-- 刷新为增量：meta 的 `indexed_at`（毫秒水位）加 `files(path,size)` 判断，只重解析变化文件；首次运行、schema 升级与 `--reindex` 才全量重建。
+- 索引文件按解析后的 `home`（未指定为当前用户主目录）取 8 位哈希命名，形如 `index-<哈希>.sqlite`（`index_suffix`），不同日志根目录各自独立一套。
+- 刷新为增量：按 meta 的 `indexed_at`（毫秒水位）加 `files(path,size)` 判断，只重解析有变化的文件；首次运行、schema 升级与 `--reindex` 才全量重建。
 - 服务每 30 分钟自动检查（`changed_files` 作闸门、`watch_index` 线程），有变化才增量更新本机索引，不自动同步远端。
 - 用量按文件存 `file_usage`、查询前聚合；跨文件重复按 `(agent,key)` 取 MAX，保持旧口径。
 </important>
 
-<important if="you are reading or writing agent logs or the index">
-- 写入只发生在 .stats/ 索引；agent 日志一律只读。
+### 远端汇入
+
+<important if="you are modifying remote import (remotes.json, /api/export, sync_remote)">
+- 本机索引只含本机数据；每台远端一个 `.stats/remote-*.sqlite`。停用只在查询时排除、不删数据，移除才删文件。
+- 汇入由本地服务主动 GET 远端 `/api/export`：按 cursor + 轮次指纹增量，远端重建时自动全量重拉；失败整事务回滚并记入该远端库的 `sync_error`。
+- 查询时合并本机与启用中的远端（用量/会话/词频按勾选）；轮次 id 形如 `<key>:<id>`，详情按前缀路由。
+- 勾选 words 隐含 search：词频轮次必须可搜索、可打开。
+- `remotes.json` 是本地个人配置（gitignore）；读写它的 `/api/remotes`、`/api/sync` 同属写操作，仅限本机（见「网络与访问边界」）。
 </important>
