@@ -3,12 +3,25 @@
 import argparse
 import json
 import sys
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from datetime import date, timedelta
+from pathlib import Path
 from stats_data import FIELDS, TOOLS
 
 DEFAULT_URL = 'http://127.0.0.1:18763'
+SERVER_URL_FILE = Path(__file__).resolve().parent / '.stats' / 'server.url'
+
+
+def default_url(url_file=SERVER_URL_FILE):
+    try:
+        saved = Path(url_file).read_text(encoding='utf-8').strip()
+        if saved:
+            return saved
+    except OSError:
+        pass
+    return DEFAULT_URL
 
 
 def total(row):
@@ -16,9 +29,22 @@ def total(row):
 
 
 def fetch_usage(url, params):
-    query = '&'.join(f'{key}={value}' for key, value in params.items())
-    with urllib.request.urlopen(f'{url}/api/usage?{query}', timeout=15) as response:
+    query = urllib.parse.urlencode(params)
+    with urllib.request.urlopen(f'{url.rstrip("/")}/api/usage?{query}', timeout=15) as response:
         return json.loads(response.read().decode('utf-8'))
+
+
+def merge_model_names(rows):
+    """按大小写不敏感合并模型显示名，取区间内用量最多的写法。"""
+    totals = defaultdict(int)
+    for (_, _, model), values in rows.items():
+        totals[model] += total(values)
+    display = {}
+    for model, amount in totals.items():
+        key = model.lower()
+        if key not in display or amount > totals[display[key]]:
+            display[key] = model
+    return display
 
 
 def render_table(headers, rows, aligns):
@@ -43,8 +69,9 @@ def main():
     period.add_argument('--week', action='store_true', help='最近 7 天')
     period.add_argument('--days', type=int, help='最近 N 天')
     parser.add_argument('--json', action='store_true', help='输出按日期、agent、模型聚合的 JSON')
-    parser.add_argument('--url', default=DEFAULT_URL, help=f'server 地址，默认 {DEFAULT_URL}')
+    parser.add_argument('--url', default=None, help=f'server 地址，默认读 .stats/server.url 或 {DEFAULT_URL}')
     args = parser.parse_args()
+    url = args.url or default_url()
     if args.days is not None and args.days < 1:
         parser.error('--days 需要正整数')
     if args.date and (args.week or args.days):
@@ -55,9 +82,9 @@ def main():
     else:
         params['n'] = str(7 if args.week else args.days or 1)
     try:
-        data = fetch_usage(args.url, params)
+        data = fetch_usage(url, params)
     except (OSError, ValueError) as error:
-        sys.exit(f'无法从 {args.url} 获取用量：{error}（server 是否已启动？）')
+        sys.exit(f'无法从 {url} 获取用量：{error}（server 是否已启动？）')
     start = date.fromisoformat(data['start'])
     end = date.fromisoformat(data['end'])
     n = (end - start).days + 1
@@ -81,10 +108,12 @@ def main():
             values = [sum(total(v) for (d, a, m), v in rows.items() if d == day and a == agent) for agent in TOOLS]
             data.append([day] + [f'{v:,}' for v in values] + [f'{sum(values):,}'])
         print('\n' + render_table(headers, data, ['l'] + ['r'] * (len(headers) - 1)))
+    display = merge_model_names(rows)
     grouped = defaultdict(lambda: dict.fromkeys(FIELDS, 0))
     for (d, a, m), values in rows.items():
+        name = display.get(m.lower(), m)
         for k in FIELDS:
-            grouped[(a, m)][k] += values[k]
+            grouped[(a, name)][k] += values[k]
     headers = ['agent / model', 'calls', 'input', 'cache_w', 'cache_r', 'out', 'total']
     data = []
     summed = dict.fromkeys(FIELDS, 0)

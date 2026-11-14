@@ -1,5 +1,7 @@
 import hashlib
 import http.client
+import importlib.util
+import io
 import json
 import os
 import shutil
@@ -16,11 +18,12 @@ from urllib.parse import parse_qs, urlsplit
 
 import stats_data
 from stats_data import Dataset, collect, usage_values
-from stats_server import (AUTO_REFRESH_SECONDS, LOOPBACK, Handler, Server, allowed_hosts, changed_files,
-                          clean_local, clean_remotes, close_sources, connect, display_url, excluded_words,
-                          index_suffix, load_local, load_remotes, meta_value, open_sources, parse_args, period,
-                          query, rebuild, remote_path, remote_status, remotes_payload, save_excluded,
-                          save_local, save_remotes, sleep_until, sync_remote, update_index)
+from stats_server import (AUTO_REFRESH_SECONDS, LOOPBACK, SCHEMA_VERSION, Handler, Server, allowed_hosts,
+                          changed_files, clean_local, clean_remotes, close_sources, connect, display_url,
+                          ensure_indexes, excluded_words, index_suffix, index_version, load_local,
+                          load_remotes, meta_value, open_sources, parse_args, period, query, rebuild,
+                          remote_path, remote_status, remotes_payload, save_excluded, save_local,
+                          save_remotes, sleep_until, sync_remote, update_index)
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -1131,6 +1134,372 @@ class Contracts(unittest.TestCase):
             data=collect(self.home)
         self.assertEqual(data.turns,[])
         self.assertTrue(any('zstd' in warning for warning in data.warnings))
+
+    def test_remote_label_flows_to_sessions_and_search(self):
+        local_home=self.home/'lbl-local'
+        local_home.mkdir()
+        self.remote_log(local_home,[dict(type='message',id='u',message=dict(role='user',content='LOCAL 标识'))])
+        local_index=self.home/'lbl-local.sqlite'
+        rebuild(local_index,local_home)
+        remote_home=self.home/'lbl-remote'
+        remote_home.mkdir()
+        self.remote_log(remote_home,[dict(type='message',id='u',message=dict(role='user',content='LABELWORD 远端'))])
+        remote_index=self.home/'lbl-remote.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,_=self.remote_fetch(remote_index)
+        remote=dict(host='127.0.0.1',port=28763,label='书房 Mac',enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'lbl-store'
+        directory.mkdir()
+        sync_remote(remote,directory,fetch)
+        config=self.home/'lbl-remotes.json'
+        save_remotes([remote],config)
+        con=connect(local_index)
+        self.addCleanup(con.close)
+        sources=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(sources))
+        sessions=query(con,'/api/sessions',{},sources=sources)['rows']
+        self.assertEqual({r['label'] for r in sessions},{'本机','书房 Mac'})
+        search=query(con,'/api/search',dict(q='LABELWORD'),sources=sources)['rows']
+        self.assertEqual(search[0]['label'],'书房 Mac')
+
+    def test_sessions_filter_by_query_case_insensitively(self):
+        self.write('.pi/agent/sessions/Alpha-Task.jsonl',[
+            dict(type='message',id='u1',message=dict(role='user',content='甲')),
+        ])
+        self.write('.pi/agent/sessions/Beta-Run.jsonl',[
+            dict(type='message',id='u2',message=dict(role='user',content='乙')),
+        ])
+        db=self.home/'q-sessions.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        hits=query(con,'/api/sessions',dict(q='alpha'))
+        self.assertEqual([r['session'] for r in hits['rows']],['Alpha-Task'])
+        self.assertEqual(query(con,'/api/sessions',dict(q='missing'))['total'],0)
+
+    def test_ensure_indexes_backfills_missing_turn_indexes(self):
+        self.write('.pi/agent/sessions/a.jsonl',[
+            dict(type='message',id='u1',message=dict(role='user',content='索引测试')),
+        ])
+        db=self.home/'idx.sqlite'
+        rebuild(db,self.home)
+        rw=sqlite3.connect(db)
+        rw.execute('DROP INDEX IF EXISTS turn_session')
+        rw.execute('DROP INDEX IF EXISTS turn_time')
+        rw.commit()
+        rw.close()
+        ensure_indexes(db)
+        self.assertEqual(index_version(db),SCHEMA_VERSION)
+        with closing(connect(db)) as con:
+            names={r['name'] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertIn('turn_session',names)
+        self.assertIn('turn_time',names)
+
+    def test_agy_companion_db_mtime_triggers_incremental_refresh(self):
+        session='agy-watch'
+        path=self.write(f'.gemini/antigravity-cli/brain/{session}/.system_generated/logs/transcript.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:00:00Z',
+                 content='<USER_REQUEST>测试伴随库</USER_REQUEST>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:01Z',
+                 input_tokens=10,output_tokens=2,content='答'),
+        ])
+        db=self.home/'agy-watch.sqlite'
+        rebuild(db,self.home)
+        with closing(connect(db)) as con:
+            self.assertEqual(changed_files(con,self.home),[])
+            self.assertEqual(query(con,'/api/meta',{})['models'],['unknown'])
+        comp=self.home/f'.gemini/antigravity-cli/conversations/{session}.db'
+        comp.parent.mkdir(parents=True,exist_ok=True)
+        c_con=sqlite3.connect(comp)
+        c_con.execute('CREATE TABLE gen_metadata(idx INTEGER,data BLOB,size INTEGER)')
+        c_con.execute('INSERT INTO gen_metadata VALUES(?,?,?)',
+                      (0,pb_bytes(2,pb_varint(1))+pb_bytes(1,pb_bytes(19,b'gemini-4-hydrogen')),0))
+        c_con.commit(); c_con.close()
+        future=path.stat().st_mtime+10
+        os.utime(comp,(future,future))
+        with closing(connect(db)) as con:
+            self.assertEqual([Path(p).resolve() for p,_ in changed_files(con,self.home)],[path.resolve()])
+        self.assertGreaterEqual(update_index(db,self.home),1)
+        with closing(connect(db)) as con:
+            self.assertEqual(query(con,'/api/meta',{})['models'],['gemini-4-hydrogen'])
+
+    def test_handler_payload_rejects_invalid_and_oversized_lengths(self):
+        def make_handler(length_header,body=b''):
+            handler=fake_handler('127.0.0.1:18763')
+            if length_header is not None:
+                handler.headers['Content-Length']=length_header
+            handler.rfile=io.BytesIO(body)
+            return handler
+        self.assertEqual(make_handler(None).payload(),{})
+        self.assertEqual(make_handler('0').payload(),{})
+        self.assertEqual(make_handler('8',b'{"ok":1}').payload(),{'ok':1})
+        for bad in ('-1','abc',str(2*1024*1024)):
+            with self.assertRaises(ValueError):
+                make_handler(bad).payload()
+
+    def test_stats_today_reads_server_url_and_merges_model_case(self):
+        spec=importlib.util.spec_from_file_location('stats_today',Path(__file__).resolve().parent.parent/'stats-today.py')
+        mod=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        url_file=self.home/'server.url'
+        url_file.write_text('http://127.0.0.1:19999\n',encoding='utf-8')
+        self.assertEqual(mod.default_url(url_file),'http://127.0.0.1:19999')
+        self.assertEqual(mod.default_url(self.home/'missing.url'),mod.DEFAULT_URL)
+        rows={
+            ('2026-09-18','pi','Big-Model'):{'new':10,'cc':0,'cr':0,'out':5,'msgs':1},
+            ('2026-09-18','pi','big-model'):{'new':2,'cc':0,'cr':0,'out':1,'msgs':1},
+        }
+        self.assertEqual(mod.merge_model_names(rows),{'big-model':'Big-Model'})
+
+    def test_search_phrase_exclude_and_validation(self):
+        self.write('.pi/agent/sessions/phrase.jsonl',[
+            dict(type='message',id='u1',timestamp='2026-09-18T10:00:00Z',
+                 message=dict(role='user',content='检查 "hello world" 与 -v 参数')),
+            dict(type='message',id='a1',timestamp='2026-09-18T10:00:01Z',
+                 message=dict(role='assistant',content=[dict(type='text',text='保留结果')])),
+            dict(type='message',id='u2',timestamp='2026-09-18T10:01:00Z',
+                 message=dict(role='user',content='间隔 hello   world 与 world hello')),
+            dict(type='message',id='u3',timestamp='2026-09-18T10:02:00Z',
+                 message=dict(role='user',content='普通 hello world 命中 -v 标志')),
+            dict(type='message',id='a3',timestamp='2026-09-18T10:02:01Z',
+                 message=dict(role='assistant',content=[dict(type='text',text='SKIPWORD 需要过滤')])),
+        ])
+        db=self.home/'phrase.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        phrase_hits=query(con,'/api/search',dict(q='"hello world"'))
+        self.assertEqual(phrase_hits['total'],2)
+        flag_hits=query(con,'/api/search',dict(q='-v'))
+        self.assertEqual(flag_hits['total'],2)
+        ex_word=query(con,'/api/search',dict(q='"hello world"',exclude='SKIPWORD'))
+        self.assertEqual(ex_word['total'],1)
+        ex_phrase=query(con,'/api/search',dict(q='-v',exclude='"hello world"'))
+        self.assertEqual(ex_phrase['total'],0)
+        ex_partial=query(con,'/api/search',dict(q='hello',exclude='"world hello"'))
+        self.assertEqual(ex_partial['total'],2)
+        for bad in (dict(scope='bogus'),dict(sort='random'),dict(group='flat')):
+            with self.assertRaises(ValueError):
+                query(con,'/api/search',bad)
+
+    def test_search_scopes_relevance_and_deduped_matches(self):
+        long_prefix='A'*260
+        self.write('.claude/projects/p/scoped.jsonl',[
+            dict(type='user',uuid='u1',timestamp='2026-09-18T10:00:00Z',
+                 message=dict(role='user',content='工具轮')),
+            dict(type='assistant',uuid='a1',timestamp='2026-09-18T10:00:01Z',
+                 message=dict(id='m1',model='claude-a',role='assistant',content=[
+                     dict(type='tool_use',id='t1',name='run',input=dict(cmd='echo FINDME FINDME')),
+                 ])),
+            dict(type='user',uuid='u1r',timestamp='2026-09-18T10:00:02Z',
+                 message=dict(role='user',content=[dict(type='tool_result',tool_use_id='t1',content='FINDME output')])),
+            dict(type='user',uuid='u2',timestamp='2026-09-18T11:00:00Z',
+                 message=dict(role='user',content='思考正文轮')),
+            dict(type='assistant',uuid='a2',timestamp='2026-09-18T11:00:01Z',
+                 message=dict(id='m2',model='claude-a',role='assistant',content=[
+                     dict(type='thinking',thinking='推导 FINDME 原因'),
+                     dict(type='text',text='最终正文 FINDME 说明'),
+                 ])),
+            dict(type='user',uuid='u3',timestamp='2026-09-18T12:00:00Z',
+                 message=dict(role='user',content=f'输入首部 FINDME {long_prefix} 尾部 TAILKEY 检查')),
+            dict(type='assistant',uuid='a3',timestamp='2026-09-18T12:00:01Z',
+                 message=dict(id='m3',model='claude-a',role='assistant',content=[
+                     dict(type='text',text='回复里的 TAILKEY 上下文')
+                 ])),
+        ])
+        db=self.home/'scoped.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+        self.assertEqual([r['preview'][:5] for r in query(con,'/api/search',dict(q='FINDME',scope='input'))['rows']],['输入首部 '])
+        self.assertEqual([r['preview'] for r in query(con,'/api/search',dict(q='FINDME',scope='thinking'))['rows']],['思考正文轮'])
+        self.assertEqual([r['preview'] for r in query(con,'/api/search',dict(q='FINDME',scope='text'))['rows']],['思考正文轮'])
+        self.assertEqual([r['preview'] for r in query(con,'/api/search',dict(q='FINDME',scope='tool'))['rows']],['工具轮'])
+        newest=query(con,'/api/search',dict(q='FINDME',sort='newest'))['rows']
+        oldest=query(con,'/api/search',dict(q='FINDME',sort='oldest'))['rows']
+        relevant=query(con,'/api/search',dict(q='FINDME',sort='relevance'))['rows']
+        self.assertEqual([r['preview'][:4] for r in newest],['输入首部','思考正文','工具轮'])
+        self.assertEqual([r['preview'][:4] for r in oldest],['工具轮','思考正文','输入首部'])
+        self.assertEqual([r['preview'][:4] for r in relevant],['输入首部','思考正文','工具轮'])
+        preview_only=query(con,'/api/search',dict(q='FINDME',scope='input'))['rows'][0]
+        self.assertEqual(preview_only['hit_kinds'],['输入'])
+        self.assertEqual(preview_only['matches'],[])
+        tail_hit=query(con,'/api/search',dict(q='TAILKEY'))['rows'][0]
+        self.assertEqual(tail_hit['hit_kinds'],['输入','正文'])
+        self.assertEqual([m['kind'] for m in tail_hit['matches']],['输入(后文)','正文'])
+        self.assertTrue(all('TAILKEY' in m['text'] for m in tail_hit['matches']))
+        term_hit=query(con,'/api/search',dict(term='FINDME'))['rows'][0]
+        self.assertEqual(term_hit['hit_kinds'],['输入'])
+
+    def test_search_group_session_source_and_session_filter(self):
+        local_home=self.home/'g-local'
+        local_home.mkdir()
+        self.write('.pi/agent/sessions/Alpha-One.jsonl',[
+            dict(type='message',id='u1',timestamp='2026-09-18T10:00:00Z',message=dict(role='user',content='GROUPKEY 第一轮')),
+            dict(type='message',id='u2',timestamp='2026-09-18T10:05:00Z',message=dict(role='user',content='GROUPKEY 第二轮')),
+        ],home=local_home)
+        self.write('.pi/agent/sessions/Beta-Two.jsonl',[
+            dict(type='message',id='u3',timestamp='2026-09-18T11:00:00Z',message=dict(role='user',content='GROUPKEY 第三轮')),
+        ],home=local_home)
+        local_index=self.home/'g-local.sqlite'
+        rebuild(local_index,local_home)
+        remote_home=self.home/'g-remote'
+        remote_home.mkdir()
+        self.write('.pi/agent/sessions/Gamma-Remote.jsonl',[
+            dict(type='message',id='u4',timestamp='2026-09-18T12:00:00Z',message=dict(role='user',content='GROUPKEY 远端轮')),
+        ],home=remote_home)
+        remote_index=self.home/'g-remote.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,_=self.remote_fetch(remote_index)
+        remote=dict(host='127.0.0.1',port=28763,label='工作站',enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'g-store'
+        directory.mkdir()
+        sync_remote(remote,directory,fetch)
+        config=self.home/'g-remotes.json'
+        save_remotes([remote],config)
+        con=connect(local_index)
+        self.addCleanup(con.close)
+        sources=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(sources))
+        meta=query(con,'/api/meta',{},sources=sources)
+        self.assertEqual([s['label'] for s in meta['search_sources']],['本机','工作站'])
+        grouped=query(con,'/api/search',dict(q='GROUPKEY',group='session',sort='newest'),sources=sources)
+        self.assertEqual(grouped['group'],'session')
+        self.assertEqual(grouped['total'],3)
+        self.assertEqual(grouped['total_turns'],4)
+        self.assertEqual([(g['session'],g['hit_turns'],g['label']) for g in grouped['rows']],
+                         [('Gamma-Remote',1,'工作站'),('Beta-Two',1,'本机'),('Alpha-One',2,'本机')])
+        alpha_turns=grouped['rows'][2]['turns']
+        self.assertEqual([t['preview'] for t in alpha_turns],['GROUPKEY 第二轮','GROUPKEY 第一轮'])
+        only_local=query(con,'/api/search',dict(q='GROUPKEY',source='local'),sources=sources)
+        self.assertEqual(only_local['total'],3)
+        only_alpha=query(con,'/api/search',dict(q='GROUPKEY',session='alpha'),sources=sources)
+        self.assertEqual(only_alpha['total'],2)
+
+    def test_sessions_enhanced_sort_filters_topic_models_and_detail_stats(self):
+        self.write('.pi/agent/sessions/s-old-heavy.jsonl',[
+            dict(type='model_change',modelId='Model-Alpha',timestamp='2026-09-10T08:00:00+08:00'),
+            dict(type='message',id='u1',timestamp='2026-09-10T08:00:00+08:00',
+                 message=dict(role='user',content='设计旧重会话主题   多空格压缩')),
+            dict(type='message',id='a1',timestamp='2026-09-10T08:00:01+08:00',
+                 message=dict(role='assistant',model='Model-Alpha',
+                              content=[dict(type='thinking',thinking='推演'),dict(type='text',text='回复')],
+                              usage=dict(input=500,cacheWrite=100,cacheRead=50,output=50))),
+            dict(type='message',id='u2',timestamp='2026-09-19T12:00:00+08:00',
+                 message=dict(role='user',content='后续继续追踪')),
+            dict(type='message',id='a2',timestamp='2026-09-19T12:00:01+08:00',
+                 message=dict(role='assistant',model='Model-Beta',content=[dict(type='text',text='ok')],
+                              usage=dict(input=10,output=5))),
+        ])
+        self.write('.pi/agent/sessions/s-mid-many.jsonl',[
+            dict(type='message',id='m1',timestamp='2026-09-15T09:00:00+08:00',
+                 message=dict(role='user',content='多轮会话第1问')),
+            dict(type='message',id='m2',timestamp='2026-09-15T09:05:00+08:00',
+                 message=dict(role='user',content='多轮会话第2问')),
+            dict(type='message',id='m3',timestamp='2026-09-15T09:10:00+08:00',
+                 message=dict(role='user',content='多轮会话第3问')),
+            dict(type='message',id='ma3',timestamp='2026-09-15T09:10:01+08:00',
+                 message=dict(role='assistant',model='model-alpha',content=[dict(type='text',text='答')],
+                              usage=dict(input=20,output=10))),
+        ])
+        self.write('.pi/agent/sessions/s-new-nousage.jsonl',[
+            dict(type='message',id='n1',timestamp='2026-09-18T10:00:00+08:00',
+                 message=dict(role='user',content='无用量新会话 TOPICKEY 检查')),
+        ])
+        db=self.home/'sess-enh.sqlite'
+        rebuild(db,self.home)
+        con=connect(db)
+        self.addCleanup(con.close)
+
+        by_created=query(con,'/api/sessions',{})
+        self.assertEqual([r['session'] for r in by_created['rows']],['s-new-nousage','s-mid-many','s-old-heavy'])
+        self.assertEqual(by_created['summary'],{'sessions':3,'turns':6,'total_tokens':745})
+        self.assertEqual(by_created['rows'][2]['topic'],'设计旧重会话主题 多空格压缩')
+        self.assertEqual(by_created['rows'][2]['models'],['Model-Alpha','Model-Beta'])
+
+        self.assertEqual([r['session'] for r in query(con,'/api/sessions',dict(sort='active'))['rows']],
+                         ['s-old-heavy','s-new-nousage','s-mid-many'])
+        self.assertEqual([r['session'] for r in query(con,'/api/sessions',dict(sort='turns'))['rows']],
+                         ['s-mid-many','s-old-heavy','s-new-nousage'])
+        self.assertEqual([r['session'] for r in query(con,'/api/sessions',dict(sort='tokens'))['rows']],
+                         ['s-old-heavy','s-mid-many','s-new-nousage'])
+
+        self.assertEqual([r['session'] for r in query(con,'/api/sessions',dict(q='topickey'))['rows']],['s-new-nousage'])
+        by_model=query(con,'/api/sessions',dict(model='MODEL-BETA'))
+        self.assertEqual([r['session'] for r in by_model['rows']],['s-old-heavy'])
+        self.assertEqual(by_model['rows'][0]['turns'],2)
+        by_date=query(con,'/api/sessions',dict(start='2026-09-18',end='2026-09-20'))
+        self.assertEqual({r['session'] for r in by_date['rows']},{'s-old-heavy','s-new-nousage'})
+
+        detail=query(con,'/api/session',dict(agent='pi',session='s-old-heavy'))
+        self.assertEqual(detail['models'],['Model-Alpha','Model-Beta'])
+        self.assertEqual(detail['usage'],{'new':510,'cc':100,'cr':50,'out':55,'msgs':2,'total':715})
+        self.assertEqual((detail['turns'][0]['input_len'],detail['turns'][0]['part_count']),(len('设计旧重会话主题   多空格压缩'),2))
+        detail_none=query(con,'/api/session',dict(agent='pi',session='s-new-nousage'))
+        self.assertIsNone(detail_none['usage'])
+        with self.assertRaises(ValueError):
+            query(con,'/api/sessions',dict(sort='invalid'))
+
+    def test_words_enhanced_sort_kind_min_turns_source_query_and_summary(self):
+        local_home=self.home/'w-local'
+        local_home.mkdir()
+        self.write('.pi/agent/sessions/w1.jsonl',[
+            dict(type='message',id='u1',message=dict(role='user',content='spamword spamword spamword spamword 设计 api3')),
+            dict(type='message',id='u2',message=dict(role='user',content='设计 api3 status')),
+            dict(type='message',id='u3',message=dict(role='user',content='设计 status')),
+        ],home=local_home)
+        local_index=self.home/'w-local.sqlite'
+        rebuild(local_index,local_home)
+
+        remote_home=self.home/'w-remote'
+        remote_home.mkdir()
+        self.write('.pi/agent/sessions/wr.jsonl',[
+            dict(type='message',id='r1',message=dict(role='user',content='remoteword remoteword')),
+        ],home=remote_home)
+        remote_index=self.home/'w-remote.sqlite'
+        rebuild(remote_index,remote_home)
+        fetch,_=self.remote_fetch(remote_index)
+        remote=dict(host='127.0.0.1',port=28763,label='远端',enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'w-store'
+        directory.mkdir()
+        sync_remote(remote,directory,fetch)
+        config=self.home/'w-remotes.json'
+        save_remotes([remote],config)
+        con=connect(local_index)
+        self.addCleanup(con.close)
+        sources=open_sources(con,load_remotes(config),directory)
+        self.addCleanup(lambda: close_sources(sources))
+
+        meta=query(con,'/api/meta',{},sources=sources)
+        self.assertEqual([s['key'] for s in meta['words_sources']],['local',meta['words_sources'][1]['key']])
+
+        by_count=query(con,'/api/words',dict(source='local'),sources=sources)
+        self.assertEqual(by_count['words'][0]['term'],'spamword')
+        self.assertEqual(by_count['summary']['scoped_turns'],3)
+
+        by_turns=query(con,'/api/words',dict(source='local',sort='turns',min_turns='2'),sources=sources)
+        terms=[w['term'] for w in by_turns['words']]
+        self.assertNotIn('spamword',terms)
+        self.assertEqual(terms[0],'设计')
+        self.assertGreater(by_turns['words'][0]['turn_rate'],90.0)
+
+        by_avg=query(con,'/api/words',dict(source='local',sort='avg'),sources=sources)
+        self.assertEqual(by_avg['words'][0]['term'],'spamword')
+        self.assertEqual(by_avg['words'][0]['avg'],4.0)
+
+        zh_only=query(con,'/api/words',dict(source='local',kind='zh'),sources=sources)
+        self.assertEqual([w['term'] for w in zh_only['words']],['设计'])
+        code_only=query(con,'/api/words',dict(source='local',kind='code',q='api'),sources=sources)
+        self.assertEqual([w['term'] for w in code_only['words']],['api3'])
+
+        with_remote=query(con,'/api/words',dict(q='remoteword'),sources=sources)
+        self.assertEqual(len(with_remote['words']),1)
+        only_local_remote=query(con,'/api/words',dict(source='local',q='remoteword'),sources=sources)
+        self.assertEqual(only_local_remote['words'],[])
+
+        for bad in (dict(sort='freq'),dict(kind='emoji'),dict(min_turns='0')):
+            with self.assertRaises(ValueError):
+                query(con,'/api/words',bad,sources=sources)
 
 
 if __name__=='__main__':

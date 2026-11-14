@@ -33,5 +33,9 @@
 | 27 | 远端主机备注名（label，可空） | P3 | ✅ | [remote-host-label.md](docs/tasks/remote-host-label.md)：契约43项+node检查通过，无头截图实测 |
 | 28 | OMP 第七类 agent：解析 .omp/agent/sessions 并入索引 | P2 | ✅ | [omp-sessions.md](docs/tasks/omp-sessions.md)：契约46项+node检查通过；实测 sources omp=4、页面筛选与排名可见；另修 3 项既有失败测试（写死日期窗口×2、/tmp 符号链接哈希×1） |
 | 29 | agy（Antigravity CLI）第八类 agent：转录 + protobuf 模型名 | P2 | ✅ | [agy-sessions.md](docs/tasks/agy-sessions.md)：契约48项（1 skip：无 zstd）+node 检查通过；服务重启并刷新后 agents/sources 含 agy、两个会话可打开；另按平台跳过 local.json 权限位断言 |
+| 30 | 前端可视化、图表与交互界面升级 | P1 | ✅ | [ui-charts-upgrade.md](docs/tasks/ui-charts-upgrade.md)：KPI 副指标与 Token 构成条；5 项指标口径 + 堆叠/占比/构成趋势切换；固定左 Y 轴+列悬停提示+图例/环形图联动+展开其他；可排序明细表（含合计行/缩写切换）、日期预设、深浅主题与 Chrome 实测通过 |
+| 31 | 前端缺陷修复与全仓后端/CLI 性能及健壮性优化 | P0 | ✅ | [repo-fixes-and-perf.md](docs/tasks/repo-fixes-and-perf.md)：修复 data-tip 文本注入、checkFresh 打断编辑、AbortController 竞态与会话跳转时序；补充 SQLite 索引、内存 Set 去重、agy DB mtime 联动、/api/sessions 过滤与 CLI .stats/server.url 读取；契约 55 项+node 检查通过 |
+| 32 | 会话搜索功能优化与增强 | P1 | ✅ | [search-enhancement.md](docs/tasks/search-enhancement.md)：拆分 COUNT 与 LIMIT 查询、短词预过滤、引号精确短语/排除词/scope/source/session/relevance/会话分组、多片段命中摘要与展开高亮导航；契约 58 项+node 检查+Chrome 桌面/移动实测通过 |
+| 33 | 会话展示与输入词频功能优化增强 | P1 | ✅ | [sessions-words-enhancement.md](docs/tasks/sessions-words-enhancement.md)：`/api/sessions` 补首句 topic/models/排序/合并筛选与总量摘要、`/api/session` 补用量拆解与批展开/倒序/首末跳/MD 导出；`/api/words` 补排序/词性过滤/最少轮次/子串过滤/平均占比与词云+4 KPI+撤销排除；契约 60 项+node 检查+Chrome 桌面/移动实测通过 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。

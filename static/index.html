@@ -1,31 +1,413 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agent Atlas · 使用统计</title><link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48"><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent Atlas · 使用统计</title>
+  <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+  <link rel="stylesheet" href="/style.css">
+  <script defer src="/app.js"></script>
+</head>
 <body>
-<header><a class="brand" href="/"><span class="logo">a.</span> Agent Atlas <span class="local">LOCAL</span></a><div class="header-right"><span id="status" role="status" aria-live="polite"></span><span id="updated">正在读取索引</span><button id="refresh">↻ 刷新数据</button></div></header>
+<header>
+  <a class="brand" href="/"><span class="logo">a.</span> Agent Atlas <span class="local">LOCAL</span></a>
+  <div class="header-right">
+    <button id="freshNotice" class="pill-notice" type="button" hidden>发现新数据 · 点击更新</button>
+    <span id="status" role="status" aria-live="polite"></span>
+    <span id="updated">正在读取索引</span>
+    <button id="themeToggle" type="button" class="icon-btn" title="切换深浅色主题" aria-label="切换深浅色主题">☾</button>
+    <button id="refresh" type="button">↻ 刷新数据</button>
+  </div>
+</header>
 <main>
-<div class="intro"><div class="eyebrow">YOUR WORK, IN PERSPECTIVE</div><h1>看见每一次思考。</h1><p>从模型用量到会话细节，在一个地方了解你的 AI 工作方式。</p></div>
-<details id="remotes" class="remotes" hidden><summary>远端主机 <span id="remoteSummary">（未配置）</span></summary>
-<p class="subtle">汇入其他机器上同一服务的索引：用量、会话搜索、词频。停用只影响统计、不删除已同步数据；新增或点「同步」时按增量拉取；远端需运行同一版本，词频需要会话索引。</p>
-<div id="remoteList"></div>
-<form id="remoteForm"><input id="remoteHost" placeholder="主机或 IP" aria-label="远端主机"><input id="remotePort" type="number" min="1" max="65535" value="18763" aria-label="远端端口"><label><input type="checkbox" id="remoteUsage" checked> 用量</label><label><input type="checkbox" id="remoteSearch" checked> 会话索引</label><label><input type="checkbox" id="remoteWords" checked> 词频索引</label><button class="primary">添加并同步</button></form>
-</details>
-<nav aria-label="页面"><button data-tab="usage" class="active" aria-current="page">用量概览</button><button data-tab="search">会话搜索</button><button data-tab="sessions">会话</button><button data-tab="words">输入词频</button></nav>
-<div class="filters"><label>Agent <select id="agent"><option value="">全部 agent</option></select></label><label>模型 <select id="model"><option value="">全部模型</option></select></label><div id="periodControls"><span>最近</span><input id="n" type="number" min="1" max="366" value="14" aria-label="最近周期数量"><select id="unit" aria-label="周期"><option value="day">天</option><option value="week">周</option><option value="month">月</option></select></div><div id="dateControls" hidden><label>从 <input type="date" id="start"></label><label>至 <input type="date" id="end"></label><button id="allDates">全部时间</button></div><button class="text-button" id="reset">重置筛选</button></div>
-<div id="notice" role="status" aria-live="polite"></div>
-<section id="usage" aria-label="用量概览">
-<div class="metrics"><article><span>总用量 · Tokens</span><strong id="total">—</strong><small id="range">—</small></article><article><span>新增输入</span><strong id="input">—</strong><small>不含缓存的输入 token</small></article><article><span>缓存用量</span><strong id="cache">—</strong><small id="cacheDetail">读取 + 写入</small></article><article><span>模型输出</span><strong id="output">—</strong><small>包含思考 token</small></article></div>
-<div class="chart-grid"><article class="panel trend"><div class="panel-head"><div><h2>用量趋势</h2><p>按时间聚合，每根柱表示一个周期</p></div><label>分组 <select id="group"><option value="agent">Agent</option><option value="model">模型</option><option value="pair">Agent + 模型</option></select></label></div><div id="bars" class="chart-scroll"></div><div id="barLegend" class="legend"></div></article><article class="panel"><div class="panel-head"><div><h2>用量占比</h2><p>与趋势使用相同分组和筛选</p></div></div><div id="pie"></div><div id="pieLegend" class="pie-legend"></div></article></div>
-<div class="rank-grid"><article class="panel"><div class="panel-head"><div><h2>Agent 使用排名</h2><p>总 token 降序，跟随筛选与周期</p></div></div><div id="agentRank" class="rank-list"></div></article><article class="panel"><div class="panel-head"><div><h2>模型使用排名</h2><p>总 token 降序，跟随筛选与周期</p></div></div><div id="modelRank" class="rank-list"></div></article></div>
-<article class="panel"><div class="panel-head"><h2>Agent × 模型明细</h2><span class="subtle">单位：token · 按总用量降序</span></div><div class="table-scroll"><table><thead><tr><th>Agent / 模型</th><th>调用次数</th><th>新增输入</th><th>缓存写入</th><th>缓存读取</th><th>输出</th><th>总用量</th></tr></thead><tbody id="usageRows"></tbody></table></div></article>
-</section>
-<section id="search" hidden aria-label="会话搜索"><form id="searchForm" class="search-box"><span aria-hidden="true">⌕</span><input id="q" placeholder="搜索用户输入、模型输出、思考或工具内容…" aria-label="会话搜索词"><button class="primary">搜索</button></form><div class="length-box"><label>用户输入长度 <input id="minLen" type="number" min="0" max="100000" placeholder="最短" aria-label="用户输入最短字数"> 至 <input id="maxLen" type="number" min="0" max="100000" placeholder="最长" aria-label="用户输入最长字数"> 字</label></div><div class="section-caption"><p id="searchCount">按轮次匹配 · 多个关键词用空格分隔，需全部命中</p><button id="clearTerm" hidden>清除词频筛选</button></div><div id="results"></div><div class="pagination"><button id="prev">← 上一页</button><span id="page"></span><button id="next">下一页 →</button></div></section>
-<section id="sessions" hidden aria-label="会话列表">
-<div id="sessionListView"><div class="section-caption"><p id="sessionCount">按创建时间倒序列出全部会话</p></div><div id="sessionList"></div><div class="pagination"><button id="sessionPrev">← 上一页</button><span id="sessionPage"></span><button id="sessionNext">下一页 →</button></div></div>
-<div id="sessionDetail" hidden><div class="session-head"><button id="sessionBack">← 返回会话列表</button><div id="sessionMeta"></div></div><div id="sessionTurns"></div></div>
-</section>
-<section id="words" hidden aria-label="用户输入词频"><div class="panel"><div class="panel-head"><div><h2>你经常谈论什么？</h2><p>已索引会话中的人工输入 · 中文分词、英文归一化、过滤常用停用词</p></div><div class="word-controls"><select id="wordOrder" aria-label="排序方向"><option value="desc" selected>高→低</option><option value="asc">低→高</option></select><label>展示 <select id="wordLimit"><option value="20">前 20 词</option><option value="40" selected>前 40 词</option><option value="100">前 100 词</option></select></label></div></div><p class="subtle">点击词语，查看包含该词的会话轮次。数字分别表示出现次数与覆盖轮次。</p><div class="exclude-box"><span>排除关键词</span><div id="excludedWords"></div><input id="excludeInput" placeholder="空格分隔，可多个" aria-label="要排除的关键词"><button id="excludeAdd">排除</button><button id="hideAlnum" aria-pressed="false" title="仅显示不含数字与英文字母的词，不写入排除列表">只看中文</button></div><div id="wordChart"></div></div></section>
-<div id="tip" role="tooltip" hidden></div>
-<footer><span id="coverage"></span><details id="warnings"><summary>数据口径与读取提示</summary><p>Agent 指 Claude、Codex、Pi、OpenCode、Grok、dsh、OMP、agy。用量来自本机日志，并非账单。周从周一开始，月按自然月，当前周期截至今天。unknown 表示日志没有模型信息。</p><p>会话按用户输入至下一次用户输入划分；保留日志中可见的思考和工具内容。词频仅统计用户输入，过滤单字、纯数字和常见停用词。</p><div id="warningList"></div></details></footer>
+  <div class="intro">
+    <div class="eyebrow">YOUR WORK, IN PERSPECTIVE</div>
+    <h1>看见每一次思考。</h1>
+    <p>从模型用量到会话细节，在一个地方了解你的 AI 工作方式。</p>
+  </div>
+  <details id="remotes" class="remotes" hidden>
+    <summary>远端主机 <span id="remoteSummary">（未配置）</span></summary>
+    <p class="subtle">汇入其他机器上同一服务的索引：用量、会话搜索、词频。停用只影响统计、不删除已同步数据；新增或点「同步」时按增量拉取；远端需运行同一版本，词频需要会话索引。</p>
+    <div id="remoteList"></div>
+    <form id="remoteForm">
+      <input id="remoteHost" placeholder="主机或 IP" aria-label="远端主机">
+      <input id="remotePort" type="number" min="1" max="65535" value="18763" aria-label="远端端口">
+      <label><input type="checkbox" id="remoteUsage" checked> 用量</label>
+      <label><input type="checkbox" id="remoteSearch" checked> 会话索引</label>
+      <label><input type="checkbox" id="remoteWords" checked> 词频索引</label>
+      <button class="primary">添加并同步</button>
+    </form>
+  </details>
+  <nav role="tablist" aria-label="页面">
+    <button role="tab" id="tab-usage" data-tab="usage" class="active" aria-selected="true" aria-controls="usage">用量概览</button>
+    <button role="tab" id="tab-search" data-tab="search" aria-selected="false" aria-controls="search">会话搜索</button>
+    <button role="tab" id="tab-sessions" data-tab="sessions" aria-selected="false" aria-controls="sessions">会话</button>
+    <button role="tab" id="tab-words" data-tab="words" aria-selected="false" aria-controls="words">输入词频</button>
+  </nav>
+  <div class="filters">
+    <label>Agent <select id="agent"><option value="">全部 agent</option></select></label>
+    <label>模型 <select id="model"><option value="">全部模型</option></select></label>
+    <div id="periodControls">
+      <select id="rangePreset" aria-label="时间范围模式">
+        <option value="recent" selected>最近周期</option>
+        <option value="today">今天</option>
+        <option value="7d">近 7 天</option>
+        <option value="30d">近 30 天</option>
+        <option value="month">本月</option>
+        <option value="custom">自定义日期</option>
+      </select>
+      <span id="recentCountWrap">
+        <input id="n" type="number" min="1" max="366" value="14" aria-label="最近周期数量">
+      </span>
+      <select id="unit" aria-label="聚合粒度">
+        <option value="day">按天</option>
+        <option value="week">按周</option>
+        <option value="month">按月</option>
+      </select>
+    </div>
+    <div id="dateControls" hidden>
+      <label>从 <input type="date" id="start"></label>
+      <label>至 <input type="date" id="end"></label>
+      <button id="allDates" type="button">全部时间</button>
+    </div>
+    <button class="text-button" id="reset" type="button">重置筛选</button>
+  </div>
+  <div id="notice" role="status" aria-live="polite"></div>
+
+  <section id="usage" role="tabpanel" aria-labelledby="tab-usage">
+    <div class="metrics">
+      <article>
+        <span>总用量 · Tokens</span>
+        <strong id="total">—</strong>
+        <small id="range">—</small>
+      </article>
+      <article>
+        <span>新增输入</span>
+        <strong id="input">—</strong>
+        <small id="inputSub">不含缓存的输入 token</small>
+      </article>
+      <article>
+        <span>缓存用量</span>
+        <strong id="cache">—</strong>
+        <small id="cacheDetail">读取 + 写入</small>
+      </article>
+      <article>
+        <span>模型输出</span>
+        <strong id="output">—</strong>
+        <small id="outputSub">包含思考 token</small>
+      </article>
+    </div>
+
+    <article class="panel comp-panel">
+      <div class="comp-head">
+        <span class="comp-title">Token 构成分布</span>
+        <span id="compSummary" class="subtle">—</span>
+      </div>
+      <div id="compBar" class="comp-bar" role="img" aria-label="Token 构成比例条"></div>
+      <div id="compLegend" class="legend"></div>
+    </article>
+
+    <div class="usage-toolbar">
+      <span class="subtle">图表与排名口径</span>
+      <div id="metricSwitch" class="seg-group" role="group" aria-label="统计口径">
+        <button type="button" data-metric="total" class="active" aria-pressed="true">总用量</button>
+        <button type="button" data-metric="active" aria-pressed="false" title="新增输入 + 模型输出（排除缓存读写干扰）">非缓存</button>
+        <button type="button" data-metric="out" aria-pressed="false">模型输出</button>
+        <button type="button" data-metric="new" aria-pressed="false">新增输入</button>
+        <button type="button" data-metric="msgs" aria-pressed="false">调用次数</button>
+      </div>
+    </div>
+
+    <div class="chart-grid">
+      <article class="panel trend">
+        <div class="panel-head">
+          <div>
+            <h2>用量趋势</h2>
+            <p id="trendHint">每根柱表示一个周期 · 双击或按 Enter 下钻会话搜索</p>
+          </div>
+          <div class="chart-controls">
+            <label>模式 <select id="trendMode" aria-label="柱状图模式">
+              <option value="stack">堆叠</option>
+              <option value="percent">占比 100%</option>
+              <option value="composition">Token 构成</option>
+            </select></label>
+            <label>分组 <select id="group" aria-label="分组维度">
+              <option value="agent">Agent</option>
+              <option value="model">模型</option>
+              <option value="pair">Agent + 模型</option>
+            </select></label>
+          </div>
+        </div>
+        <div class="bars-stage">
+          <div id="barsY" class="bars-y" aria-hidden="true"></div>
+          <div id="bars" class="chart-scroll"></div>
+        </div>
+        <div id="barLegend" class="legend interactive-legend"></div>
+        <div id="otherDetail" class="other-detail" hidden></div>
+      </article>
+
+      <article class="panel donut-panel">
+        <div class="panel-head">
+          <div>
+            <h2>用量占比</h2>
+            <p>悬停扇区或图例联动高亮</p>
+          </div>
+        </div>
+        <div id="pie"></div>
+        <div id="pieLegend" class="pie-legend"></div>
+      </article>
+    </div>
+
+    <div class="rank-grid">
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>Agent 使用排名</h2>
+            <p>点击行可筛选或取消筛选</p>
+          </div>
+        </div>
+        <div id="agentRank" class="rank-list"></div>
+      </article>
+      <article class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>模型使用排名</h2>
+            <p>点击行可筛选或取消筛选</p>
+          </div>
+        </div>
+        <div id="modelRank" class="rank-list"></div>
+      </article>
+    </div>
+
+    <article class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Agent × 模型明细</h2>
+          <p class="subtle">点击表头排序 · 点击行可快速筛选对应 Agent 与模型</p>
+        </div>
+        <div class="table-actions">
+          <button id="compactToggle" type="button" class="chip-btn" aria-pressed="false">显示缩写</button>
+        </div>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead id="usageHead"></thead>
+          <tbody id="usageRows"></tbody>
+          <tfoot id="usageFoot"></tfoot>
+        </table>
+      </div>
+    </article>
+  </section>
+
+  <section id="search" hidden role="tabpanel" aria-labelledby="tab-search">
+    <form id="searchForm" class="search-box">
+      <span aria-hidden="true">⌕</span>
+      <input id="q" type="search" placeholder='搜索关键词，空格分隔需全命中，支持 "精确短语"（按 / 聚焦）' aria-label="会话搜索词">
+      <button id="qClear" type="button" class="search-clear" title="清空搜索词" aria-label="清空搜索词" hidden>✕</button>
+      <button class="primary">搜索</button>
+    </form>
+    <div class="search-controls">
+      <label>范围
+        <select id="searchScope" aria-label="搜索内容范围">
+          <option value="all">全部内容</option>
+          <option value="input">仅用户输入</option>
+          <option value="text">仅响应正文</option>
+          <option value="thinking">仅思考过程</option>
+          <option value="tool">仅工具调用/结果</option>
+        </select>
+      </label>
+      <label>排序
+        <select id="searchSort" aria-label="搜索排序方式">
+          <option value="newest">最新优先</option>
+          <option value="oldest">最早优先</option>
+          <option value="relevance">匹配度优先</option>
+        </select>
+      </label>
+      <div id="searchGroup" class="seg-group seg-compact" role="group" aria-label="搜索结果视图">
+        <button type="button" data-group="turn" class="active" aria-pressed="true">按轮次</button>
+        <button type="button" data-group="session" aria-pressed="false">按会话分组</button>
+      </div>
+      <label id="searchSourceWrap" hidden>来源
+        <select id="searchSource" aria-label="搜索来源主机">
+          <option value="">全部来源</option>
+        </select>
+      </label>
+      <label>排除
+        <input id="excludeQuery" type="search" placeholder='排除词或 "..."' aria-label="排除关键词">
+      </label>
+      <label>会话
+        <input id="sessionFilter" type="search" placeholder="会话 ID 子串…" aria-label="限定会话 ID">
+      </label>
+      <div class="length-box">
+        <label>输入长度
+          <select id="lenPreset" aria-label="输入长度预设">
+            <option value="">不限</option>
+            <option value="short">短（≤30）</option>
+            <option value="medium">中（31–300）</option>
+            <option value="long">长（≥301）</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <span class="length-range">
+          <input id="minLen" type="number" min="0" max="100000" placeholder="最短" aria-label="用户输入最短字数">
+          <span>至</span>
+          <input id="maxLen" type="number" min="0" max="100000" placeholder="最长" aria-label="用户输入最长字数">
+          <span>字</span>
+        </span>
+      </div>
+    </div>
+    <div class="section-caption">
+      <p id="searchCount">按轮次匹配 · 多个关键词用空格分隔，需全部命中</p>
+      <div class="search-caption-actions">
+        <button id="clearSessionFilter" type="button" class="chip-btn" hidden>清除会话筛选</button>
+        <button id="clearTerm" type="button" class="chip-btn" hidden>清除词频筛选</button>
+      </div>
+    </div>
+    <div id="results"></div>
+    <div class="pagination">
+      <button id="prev" type="button">← 上一页</button>
+      <span id="page"></span>
+      <button id="next" type="button">下一页 →</button>
+    </div>
+  </section>
+
+  <section id="sessions" hidden role="tabpanel" aria-labelledby="tab-sessions">
+    <div id="sessionListView">
+      <div class="section-caption session-toolbar">
+        <p id="sessionCount">按创建时间倒序列出全部会话</p>
+        <div class="session-controls">
+          <label id="sessionSourceWrap" hidden>来源
+            <select id="sessionSource" aria-label="会话来源主机"></select>
+          </label>
+          <label>排序
+            <select id="sessionSort" aria-label="会话排序方式">
+              <option value="created">最新创建</option>
+              <option value="active">最近活跃</option>
+              <option value="tokens">Token 最高</option>
+              <option value="turns">轮次最多</option>
+            </select>
+          </label>
+          <div class="session-filter">
+            <input id="sessionQuery" type="search" placeholder="按会话 ID 或首句主题过滤…" aria-label="按会话 ID 或首句主题过滤">
+            <button id="sessionQueryClear" type="button" class="search-clear compact-clear" title="清空过滤词" aria-label="清空过滤词" hidden>✕</button>
+          </div>
+        </div>
+      </div>
+      <div id="sessionSummaryBar" class="mini-stats" hidden></div>
+      <div id="sessionList"></div>
+      <div class="pagination">
+        <button id="sessionPrev" type="button">← 上一页</button>
+        <span id="sessionPage"></span>
+        <button id="sessionNext" type="button">下一页 →</button>
+      </div>
+    </div>
+    <div id="sessionDetail" hidden>
+      <div class="session-head">
+        <button id="sessionBack" type="button">← 返回会话列表</button>
+        <div id="sessionMeta"></div>
+      </div>
+      <div id="sessionDetailStats" class="session-detail-stats" hidden></div>
+      <div class="session-detail-tools">
+        <input id="detailFilter" type="search" placeholder="筛选当前会话轮次（预览 / 模型 / 时间）…" aria-label="筛选当前会话轮次">
+        <span id="detailMatchCount" class="subtle"></span>
+        <div class="session-detail-btns">
+          <button id="detailOrder" type="button" class="chip-btn" aria-pressed="false" title="切换轮次显示顺序">↓ 正序</button>
+          <button id="detailJumpEdge" type="button" class="chip-btn" title="快速跳转末轮或首轮">↓ 末轮</button>
+          <button id="sessionExpandAll" type="button" class="chip-btn">全部展开</button>
+          <button id="exportSessionMd" type="button" class="chip-btn" title="将全部轮次导出为 Markdown 文件">导出 .md</button>
+        </div>
+      </div>
+      <div id="sessionTurns"></div>
+    </div>
+  </section>
+
+  <section id="words" hidden role="tabpanel" aria-labelledby="tab-words">
+    <div class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>你经常谈论什么？</h2>
+          <p>已索引会话中的人工输入 · 中文分词、英文归一化、过滤常用停用词</p>
+        </div>
+        <div class="word-controls">
+          <div id="wordView" class="seg-group seg-compact" role="group" aria-label="词频展示方式">
+            <button type="button" data-wview="bars" class="active" aria-pressed="true">排行条</button>
+            <button type="button" data-wview="cloud" aria-pressed="false">词云</button>
+          </div>
+          <label id="wordSourceWrap" hidden>来源
+            <select id="wordSource" aria-label="词频来源主机"></select>
+          </label>
+          <label>排序
+            <select id="wordSort" aria-label="词频排序指标">
+              <option value="turns">按覆盖轮次</option>
+              <option value="count" selected>按出现次数</option>
+              <option value="avg">按单轮密度</option>
+            </select>
+          </label>
+          <select id="wordOrder" aria-label="排序方向">
+            <option value="desc" selected>高→低</option>
+            <option value="asc">低→高</option>
+          </select>
+          <label>展示
+            <select id="wordLimit">
+              <option value="20">前 20 词</option>
+              <option value="40" selected>前 40 词</option>
+              <option value="100">前 100 词</option>
+              <option value="200">前 200 词</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <div class="word-subtoolbar">
+        <div id="wordKind" class="seg-group seg-compact" role="group" aria-label="词性范围">
+          <button type="button" data-kind="all" class="active" aria-pressed="true">全部词</button>
+          <button type="button" data-kind="zh" aria-pressed="false">仅中文</button>
+          <button type="button" data-kind="code" aria-pressed="false">英文与代码</button>
+        </div>
+        <label>最少覆盖
+          <select id="wordMinTurns" aria-label="最少覆盖轮次">
+            <option value="1" selected>不限（≥1 轮）</option>
+            <option value="2">≥ 2 轮（去单次噪音）</option>
+            <option value="3">≥ 3 轮</option>
+            <option value="5">≥ 5 轮</option>
+            <option value="10">≥ 10 轮</option>
+          </select>
+        </label>
+        <input id="wordQuery" type="search" placeholder="过滤词语（支持子串）…" aria-label="过滤词语">
+        <div class="word-date-presets" role="group" aria-label="快捷时间范围">
+          <button type="button" class="chip-btn" data-wrange="7d">近 7 天</button>
+          <button type="button" class="chip-btn" data-wrange="30d">近 30 天</button>
+          <button type="button" class="chip-btn" data-wrange="month">本月</button>
+          <button type="button" class="chip-btn" data-wrange="all">全部</button>
+        </div>
+      </div>
+      <div id="wordStats" class="word-stats" hidden></div>
+      <p id="wordSummary" class="subtle">点击词语，查看包含该词的会话轮次。数字分别表示出现次数与覆盖轮次。</p>
+      <div id="excludeUndo" class="undo-banner" hidden>
+        <span id="excludeUndoText"></span>
+        <button id="excludeUndoBtn" type="button" class="text-button">撤销</button>
+      </div>
+      <div class="exclude-box">
+        <span>排除关键词</span>
+        <div id="excludedWords"></div>
+        <button id="excludedToggle" type="button" class="text-button" hidden></button>
+        <button id="excludedClearAll" type="button" class="text-button" hidden>清空全部</button>
+        <input id="excludeInput" placeholder="空格分隔，可多个" aria-label="要排除的关键词">
+        <button id="excludeAdd" type="button">排除</button>
+      </div>
+      <div id="wordChart"></div>
+    </div>
+  </section>
+
+  <div id="tip" role="tooltip" hidden></div>
+  <footer>
+    <span id="coverage"></span>
+    <details id="warnings">
+      <summary>数据口径与读取提示</summary>
+      <p>Agent 指 Claude、Codex、Pi、OpenCode、Grok、dsh、OMP、agy。用量来自本机日志，并非账单。周从周一开始，月按自然月，当前周期截至今天。unknown 表示日志没有模型信息。</p>
+      <p>会话按用户输入至下一次用户输入划分；保留日志中可见的思考和工具内容。词频仅统计用户输入，过滤单字、纯数字和常见停用词。</p>
+      <div id="warningList"></div>
+    </details>
+  </footer>
 </main>
-</body></html>
+</body>
+</html>

@@ -536,7 +536,7 @@ class Dataset:
                 if turn:
                     turn['output'].extend(blocks(parts[mid]))
                     for p in parts[mid]:
-                        if p.get('type') == 'tool' and (p.get('state') or {}).get('output'):
+                        if isinstance(p, dict) and p.get('type') == 'tool' and (p.get('state') or {}).get('output'):
                             turn['output'].append({'kind': '工具结果', 'text': text_of(p['state']['output'])})
                     models = set(turn['model'].split(' · ')) - {'unknown'}
                     models.add(model)
