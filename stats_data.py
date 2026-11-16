@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import subprocess
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 TOOLS = ('claude', 'codex', 'pi', 'opencode', 'grok', 'dsh', 'omp', 'agy')
@@ -40,7 +40,7 @@ def command_input(value):
 def stamp(value):
     try:
         if isinstance(value, (int, float)):
-            return datetime.fromtimestamp(value / 1000 if value > 1e11 else value).astimezone().isoformat()
+            return datetime.fromtimestamp(value / 1000 if value > 1e11 else value, timezone.utc).astimezone().isoformat()
         return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone().isoformat()
     except (ValueError, TypeError, AttributeError, OSError):
         return ''

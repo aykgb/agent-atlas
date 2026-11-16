@@ -37,5 +37,6 @@
 | 31 | 前端缺陷修复与全仓后端/CLI 性能及健壮性优化 | P0 | ✅ | [repo-fixes-and-perf.md](docs/tasks/repo-fixes-and-perf.md)：修复 data-tip 文本注入、checkFresh 打断编辑、AbortController 竞态与会话跳转时序；补充 SQLite 索引、内存 Set 去重、agy DB mtime 联动、/api/sessions 过滤与 CLI .stats/server.url 读取；契约 55 项+node 检查通过 |
 | 32 | 会话搜索功能优化与增强 | P1 | ✅ | [search-enhancement.md](docs/tasks/search-enhancement.md)：拆分 COUNT 与 LIMIT 查询、短词预过滤、引号精确短语/排除词/scope/source/session/relevance/会话分组、多片段命中摘要与展开高亮导航；契约 58 项+node 检查+Chrome 桌面/移动实测通过 |
 | 33 | 会话展示与输入词频功能优化增强 | P1 | ✅ | [sessions-words-enhancement.md](docs/tasks/sessions-words-enhancement.md)：`/api/sessions` 补首句 topic/models/排序/合并筛选与总量摘要、`/api/session` 补用量拆解与批展开/倒序/首末跳/MD 导出；`/api/words` 补排序/词性过滤/最少轮次/子串过滤/平均占比与词云+4 KPI+撤销排除；契约 60 项+node 检查+Chrome 桌面/移动实测通过 |
+| 34 | 刷新数据耗时优化 | P1 | ✅ | [refresh-performance.md](docs/tasks/refresh-performance.md)：逐轮索引复用、无变化快路径、远端并行及重拉复用；契约 69 项+node 检查通过，服务重启与完整刷新实测通过；历史重拉仍受网络传输限制 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。

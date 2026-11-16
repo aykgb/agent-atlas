@@ -9,9 +9,10 @@ import sqlite3
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import closing
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
@@ -23,7 +24,7 @@ from stats_server import (AUTO_REFRESH_SECONDS, LOOPBACK, SCHEMA_VERSION, Handle
                           ensure_indexes, excluded_words, index_suffix, index_version, load_local,
                           load_remotes, meta_value, open_sources, parse_args, period, query, rebuild,
                           remote_path, remote_status, remotes_payload, save_excluded, save_local,
-                          save_remotes, sleep_until, sync_remote, update_index)
+                          save_remotes, sleep_until, sync_remote, sync_remotes, update_index)
 
 
 TS = '2026-09-18T12:00:00+08:00'
@@ -674,6 +675,144 @@ class Contracts(unittest.TestCase):
         self.assertEqual(query(con,'/api/meta',{})['turns'],2)
         self.assertEqual(query(con,'/api/search',dict(q='新增丙'))['total'],0)
 
+    def test_refresh_without_file_changes_preserves_index_and_update_time(self):
+        self.remote_log(self.home,[dict(type='message',id='u1',message=dict(role='user',content='UNCHANGED'))])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        before=db.read_bytes()
+        modified=db.stat().st_mtime_ns
+        self.assertEqual(update_index(db,self.home),0)
+        self.assertEqual(db.read_bytes(),before)
+        self.assertEqual(db.stat().st_mtime_ns,modified)
+
+    def test_touched_and_appended_files_preserve_existing_turn_ids_and_usage(self):
+        first=[dict(type='message',id='u1',message=dict(role='user',content='HISTORYWORD')),
+               dict(type='message',id='a1',message=dict(role='assistant',model='m',
+                    content=[dict(type='text',text='历史输出')],usage=dict(input=5,output=2)))]
+        path=self.remote_log(self.home,first)
+        self.write('.pi/agent/sessions/b.jsonl',[
+            dict(type='message',id='u2',message=dict(role='user',content='ANOTHERWORD'))])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        with closing(connect(db)) as con:
+            original=query(con,'/api/session',dict(agent='pi',session='a'))['turns'][0]
+            watermark=meta_value(con,'indexed_at')
+        os.utime(path,ns=(path.stat().st_atime_ns,(watermark+1)*1000000))
+        self.assertEqual(update_index(db,self.home),1)
+        with closing(connect(db)) as con:
+            self.assertEqual(query(con,'/api/session',dict(agent='pi',session='a'))['turns'][0],original)
+        appended=first+[
+            dict(type='message',id='u3',message=dict(role='user',content='APPENDEDWORD')),
+            dict(type='message',id='a3',message=dict(role='assistant',model='m',
+                 content=[dict(type='text',text='追加输出')],usage=dict(input=3,output=1)))]
+        self.remote_log(self.home,appended)
+        self.assertEqual(update_index(db,self.home),1)
+        with closing(connect(db)) as con:
+            detail=query(con,'/api/session',dict(agent='pi',session='a'))
+            self.assertEqual(detail['turns'][0],original)
+            self.assertEqual(len(detail['turns']),2)
+            self.assertEqual(detail['usage']['total'],11)
+            self.assertEqual(query(con,'/api/search',dict(q='APPENDEDWORD'))['total'],1)
+            words={row['term']:row['count'] for row in query(con,'/api/words',{})['words']}
+            self.assertEqual(words['historyword'],1)
+            self.assertEqual(words['appendedword'],1)
+            self.assertEqual(query(con,'/api/export',dict(section='usage'))['usage'][0]['msgs'],2)
+
+    def test_refresh_replaces_edited_output_kinds_and_removes_deleted_turns(self):
+        user=dict(type='message',id='u1',message=dict(role='user',content='EDITWORD'))
+        def answer(kind,tokens):
+            return dict(type='message',id='a1',message=dict(role='assistant',model='m',
+                        content=[dict(type=kind,**{kind:'SAMEOUTPUT'})],usage=dict(input=tokens,output=2)))
+        self.remote_log(self.home,[user,answer('text',5),
+            dict(type='message',id='u2',message=dict(role='user',content='DELETEWORD'))])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        self.remote_log(self.home,[user,answer('thinking',9)])
+        self.assertEqual(update_index(db,self.home),1)
+        with closing(connect(db)) as con:
+            detail=query(con,'/api/session',dict(agent='pi',session='a'))
+            self.assertEqual(len(detail['turns']),1)
+            turn=query(con,'/api/turn',dict(id=detail['turns'][0]['id']))
+            self.assertEqual(turn['output'][0]['kind'],'思考')
+            self.assertEqual(detail['usage']['total'],11)
+            self.assertEqual(query(con,'/api/search',dict(q='SAMEOUTPUT',scope='thinking'))['total'],1)
+            self.assertEqual(query(con,'/api/search',dict(q='SAMEOUTPUT',scope='text'))['total'],0)
+            self.assertEqual(query(con,'/api/search',dict(q='DELETEWORD'))['total'],0)
+            self.assertNotIn('deleteword',{r['term'] for r in query(con,'/api/words',{})['words']})
+
+    def test_refresh_rechecks_word_eligibility_when_text_is_unchanged(self):
+        user=dict(type='response_item',payload=dict(id='u',type='message',role='user',
+                                                  content=[dict(type='input_text',text='ELIGIBLEWORD')]))
+        self.write('.codex/sessions/r.jsonl',[user])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        with closing(connect(db)) as con:
+            self.assertIn('eligibleword',{r['term'] for r in query(con,'/api/words',{})['words']})
+        self.write('.codex/sessions/r.jsonl',[
+            dict(type='session_meta',payload=dict(id='r',source=dict(subagent=dict(other='guardian')))),user])
+        self.assertEqual(update_index(db,self.home),1)
+        with closing(connect(db)) as con:
+            self.assertEqual(query(con,'/api/search',dict(q='ELIGIBLEWORD'))['total'],1)
+            self.assertNotIn('eligibleword',{r['term'] for r in query(con,'/api/words',{})['words']})
+
+    def test_refresh_failure_rolls_back_all_changed_files_and_usage(self):
+        for name in ('a','b'):
+            self.write(f'.pi/agent/sessions/{name}.jsonl',[
+                dict(type='message',id='u1',message=dict(role='user',content='ORIGINALWORD'))])
+        db=self.home/'index.sqlite'
+        rebuild(db,self.home)
+        with closing(connect(db)) as con:
+            before=query(con,'/api/meta',{})
+        for name in ('a','b'):
+            self.write(f'.pi/agent/sessions/{name}.jsonl',[
+                dict(type='message',id='u2',message=dict(role='user',content='REPLACEMENTWORD'))])
+        from stats_server import parse_into
+        def fail_second(con,agent,path,**kwargs):
+            if path.name=='b.jsonl':
+                raise RuntimeError('write failed')
+            return parse_into(con,agent,path,**kwargs)
+        with mock.patch('stats_server.parse_into',side_effect=fail_second):
+            with self.assertRaisesRegex(RuntimeError,'write failed'):
+                update_index(db,self.home)
+        with closing(connect(db)) as con:
+            self.assertEqual(query(con,'/api/meta',{}),before)
+            self.assertEqual(query(con,'/api/search',dict(q='ORIGINALWORD'))['total'],2)
+            self.assertEqual(query(con,'/api/search',dict(q='REPLACEMENTWORD'))['total'],0)
+            self.assertEqual(len(changed_files(con,self.home)),2)
+
+    @unittest.skipUnless(hasattr(time,'tzset'),'需要可切换本地时区')
+    def test_numeric_timestamps_match_iso_dates_across_day_and_dst_boundaries(self):
+        cases=[('2026-03-08T06:59:59.123+00:00','2026-03-08T01:59:59.123000-05:00'),
+               ('2026-03-08T07:00:00+00:00','2026-03-08T03:00:00-04:00'),
+               ('2026-11-01T05:30:00+00:00','2026-11-01T01:30:00-04:00'),
+               ('2026-11-01T06:30:00+00:00','2026-11-01T01:30:00-05:00'),
+               ('2026-09-18T01:00:00+00:00','2026-09-17T21:00:00-04:00')]
+        try:
+            with mock.patch.dict(os.environ,{'TZ':'America/New_York'}):
+                time.tzset()
+                for iso,expected in cases:
+                    seconds=datetime.fromisoformat(iso).timestamp()
+                    with self.subTest(iso=iso):
+                        self.assertEqual(stats_data.stamp(seconds),expected)
+                        self.assertEqual(stats_data.stamp(seconds*1000),expected)
+                        self.assertEqual(stats_data.stamp(iso),expected)
+                for invalid in (None,{},[],'invalid'):
+                    self.assertEqual(stats_data.stamp(invalid),'')
+        finally:
+            time.tzset()
+
+    def test_remote_batch_sync_runs_concurrently_and_preserves_config_order(self):
+        remotes=[dict(host=name,port=18763) for name in ('slow','failed','fast')]
+        ready=threading.Barrier(len(remotes))
+        def sync(remote,directory):
+            ready.wait(timeout=5)
+            return dict(host=remote['host'],error='unreachable' if remote['host']=='failed' else None)
+        with mock.patch('stats_server.sync_remote',side_effect=sync):
+            statuses=sync_remotes(remotes,self.home)
+            self.assertEqual(sync_remotes([],self.home),[])
+        self.assertEqual([r['host'] for r in statuses],['slow','failed','fast'])
+        self.assertEqual([r['error'] for r in statuses],[None,'unreachable',None])
+
     def test_remote_sync_incremental_and_boundary_fallback(self):
         remote_home=self.home/'remote'
         remote_home.mkdir()
@@ -715,6 +854,90 @@ class Contracts(unittest.TestCase):
         self.addCleanup(store.close)
         self.assertEqual(query(store,'/api/search',dict(q='REMOTE 丙'))['total'],1)
         self.assertEqual(query(store,'/api/search',dict(q='REMOTE 甲'))['total'],0)
+
+    def test_remote_sync_detects_historical_edits_and_deletes_without_moving_cursor(self):
+        remote_home=self.home/'history-remote'
+        remote_home.mkdir()
+        path=self.remote_log(remote_home,[
+            dict(type='message',id='u1',message=dict(role='user',content='ORIGINALWORD'))])
+        boundary=[dict(type='message',id='u2',message=dict(role='user',content='BOUNDARYWORD'))]
+        self.write('.pi/agent/sessions/b.jsonl',boundary,home=remote_home)
+        index=self.home/'history-index.sqlite'
+        rebuild(index,remote_home)
+        fetch,calls=self.remote_fetch(index)
+        remote=dict(host='history.local',port=18763,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'history-store'
+        directory.mkdir()
+        self.assertEqual(sync_remote(remote,directory,fetch)['turns'],2)
+        with closing(connect(remote_path(remote,directory))) as con:
+            boundary_id=query(con,'/api/search',dict(q='BOUNDARYWORD'))['rows'][0]['id']
+        with closing(connect(index)) as con:
+            before=query(con,'/api/export',dict(section='turns',cursor='1',limit='1'))['turns'][0]
+        self.remote_log(remote_home,[
+            dict(type='message',id='u1',message=dict(role='user',content='EDITEDWORD'))])
+        update_index(index,remote_home)
+        with closing(connect(index)) as con:
+            after=query(con,'/api/export',dict(section='turns',cursor='1',limit='1'))['turns'][0]
+        self.assertEqual(before['id'],after['id'])
+        self.assertNotEqual(before['fingerprint'],after['fingerprint'])
+        calls.clear()
+        self.assertEqual(sync_remote(remote,directory,fetch)['turns'],2)
+        self.assertTrue(any('limit=500&cursor=0' in call for call in calls))
+        with closing(connect(remote_path(remote,directory))) as con:
+            self.assertEqual(query(con,'/api/search',dict(q='ORIGINALWORD'))['total'],0)
+            self.assertEqual(query(con,'/api/search',dict(q='EDITEDWORD'))['total'],1)
+        path.unlink()
+        update_index(index,remote_home)
+        self.assertEqual(sync_remote(remote,directory,fetch)['turns'],1)
+        with closing(connect(remote_path(remote,directory))) as con:
+            self.assertEqual(query(con,'/api/search',dict(q='BOUNDARYWORD'))['rows'][0]['id'],boundary_id)
+        self.write('.pi/agent/sessions/b.jsonl',boundary+[
+            dict(type='message',id='u3',message=dict(role='user',content='APPENDWORD'))],home=remote_home)
+        update_index(index,remote_home)
+        calls.clear()
+        self.assertEqual(sync_remote(remote,directory,fetch)['turns'],2)
+        self.assertFalse(any('limit=500&cursor=0' in call for call in calls))
+
+    def test_remote_full_resync_reuses_turns_and_rolls_back_partial_term_updates(self):
+        remote_home=self.home/'terms-remote'
+        remote_home.mkdir()
+        user=dict(type='response_item',payload=dict(id='u',type='message',role='user',
+                                                  content=[dict(type='input_text',text='ELIGIBLEWORD')]))
+        self.write('.codex/sessions/r.jsonl',[user],home=remote_home)
+        self.remote_log(remote_home,[
+            dict(type='message',id='u2',message=dict(role='user',content='BOUNDARYWORD'))])
+        index=self.home/'terms-index.sqlite'
+        rebuild(index,remote_home)
+        fetch,_=self.remote_fetch(index)
+        remote=dict(host='terms.local',port=18763,enabled=True,usage=True,search=True,words=True)
+        directory=self.home/'terms-store'
+        directory.mkdir()
+        self.assertEqual(sync_remote(remote,directory,fetch)['turns'],2)
+        store=remote_path(remote,directory)
+        with closing(connect(store)) as con:
+            turn_id=query(con,'/api/search',dict(q='ELIGIBLEWORD'))['rows'][0]['id']
+        self.write('.codex/sessions/r.jsonl',[
+            dict(type='session_meta',payload=dict(id='r',source=dict(subagent=dict(other='guardian')))),user],home=remote_home)
+        update_index(index,remote_home)
+        def interrupted(remote,path):
+            params=parse_qs(urlsplit(path).query)
+            if params.get('limit')==['500']:
+                if params.get('cursor')!=['0']:
+                    raise OSError('partial download failed')
+                page=fetch(remote,path)
+                page['turns']=page['turns'][:1]
+                page['cursor']=page['turns'][0]['id']
+                return page
+            return fetch(remote,path)
+        status=sync_remote(remote,directory,interrupted)
+        self.assertIn('partial download failed',status['error'])
+        with closing(connect(store)) as con:
+            self.assertEqual(query(con,'/api/search',dict(q='ELIGIBLEWORD'))['rows'][0]['id'],turn_id)
+            self.assertIn('eligibleword',{r['term'] for r in query(con,'/api/words',{})['words']})
+        self.assertEqual(sync_remote(remote,directory,fetch)['turns'],2)
+        with closing(connect(store)) as con:
+            self.assertEqual(query(con,'/api/search',dict(q='ELIGIBLEWORD'))['rows'][0]['id'],turn_id)
+            self.assertNotIn('eligibleword',{r['term'] for r in query(con,'/api/words',{})['words']})
 
     def test_remote_sync_keeps_sources_across_export_pages(self):
         remote_home=self.home/'pages-remote'

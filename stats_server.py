@@ -5,11 +5,13 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import sqlite3
 import threading
 import time
 import urllib.request
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -287,14 +289,14 @@ def require_contentless():
 
 
 def insert_turn(con, agent, session, model, timestamp, text, output, source,
-                terms=(), searchable=True, file=None, identity=None, fp=None):
+                terms=(), searchable=True, file=None, identity=None, fp=None, turn_id=None):
     output_text = '\n'.join(part['text'] for part in output) if isinstance(output, list) else output
     stored = json.dumps(output, ensure_ascii=False) if isinstance(output, list) else output
     if fp is None:
         fp = turn_fingerprint(agent, session, timestamp, text, output_text)
-    row = con.execute('INSERT INTO turns(agent,session,model,day,timestamp,input,output,source,file,identity,fingerprint)'
-                      ' VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                      (agent, session, model, timestamp[:10], timestamp, text, stored, source, file, identity, fp))
+    row = con.execute('INSERT INTO turns(id,agent,session,model,day,timestamp,input,output,source,file,identity,fingerprint)'
+                      ' VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                      (turn_id, agent, session, model, timestamp[:10], timestamp, text, stored, source, file, identity, fp))
     if searchable:
         con.execute('INSERT INTO search(rowid,search_text) VALUES(?,?)', (row.lastrowid, text + '\n' + output_text))
     if terms:
@@ -314,25 +316,59 @@ def index_search(con):
     con.execute('INSERT INTO search(rowid,search_text) SELECT id,' + SEARCH_TEXT + ' FROM turns')
 
 
-def store_dataset(con, source_path, data, searchable=True, identities=None):
+def delete_turn_rows(con, turn_ids):
+    rows = [(turn_id,) for turn_id in turn_ids]
+    con.executemany('DELETE FROM search WHERE rowid=?', rows)
+    con.executemany('DELETE FROM terms WHERE turn_id=?', rows)
+    con.executemany('DELETE FROM turns WHERE id=?', rows)
+
+
+def store_dataset(con, source_path, data, searchable=True, identities=None, incremental=False):
+    existing, old_terms = {}, defaultdict(dict)
+    if incremental:
+        existing = {row['identity']: row for row in con.execute(
+            'SELECT id,identity,model,timestamp,input,output,source FROM turns WHERE file=?', (source_path,))}
+        for row in con.execute('SELECT terms.turn_id,terms.term,terms.count FROM terms'
+                               ' JOIN turns ON turns.id=terms.turn_id WHERE turns.file=?', (source_path,)):
+            old_terms[row['turn_id']][row['term']] = row['count']
+        con.execute('DELETE FROM file_usage WHERE path=?', (source_path,))
+    seen, revised = set(), False
     for t in data.turns:
         identity = identity_hash(t['agent'], t['session'], t['key'])
-        if identities is not None:
+        if identity in seen:
+            continue
+        seen.add(identity)
+        previous = existing.pop(identity, None)
+        if previous is not None:
+            terms = list(Counter(tokenize(t['input'])).items()) if t.get('words', True) else []
+            if (all(previous[key] == t[key] for key in ('model', 'timestamp', 'input', 'source'))
+                    and previous['output'] == json.dumps(t['output'], ensure_ascii=False)
+                    and old_terms[previous['id']] == dict(terms)):
+                continue
+            delete_turn_rows(con, [previous['id']])
+            revised = True
+        elif identities is not None:
             if identity in identities:
                 continue
             identities.add(identity)
         elif con.execute('SELECT 1 FROM turns WHERE identity=? LIMIT 1', (identity,)).fetchone():
             continue
-        terms = list(Counter(tokenize(t['input'])).items()) if t.get('words', True) else []
+        if previous is None:
+            terms = list(Counter(tokenize(t['input'])).items()) if t.get('words', True) else []
         insert_turn(con, t['agent'], t['session'], t['model'], t['timestamp'], t['input'], t['output'],
-                    t['source'], terms, searchable, source_path, identity)
+                    t['source'], terms, searchable, source_path, identity,
+                    turn_id=previous['id'] if previous is not None else None)
+    if existing:
+        delete_turn_rows(con, [row['id'] for row in existing.values()])
+        revised = True
     con.executemany('INSERT INTO file_usage VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                     [(source_path, u['agent'], u['key'], u['day'], u['model'], u['session'],
                       u['new'], u['cc'], u['cr'], u['out'], u['msgs'])
                      for u in data.usage])
+    return revised
 
 
-def parse_into(con, agent, file, searchable=True, identities=None):
+def parse_into(con, agent, file, searchable=True, identities=None, incremental=False):
     try:
         size = file.stat().st_size
     except OSError:
@@ -345,7 +381,7 @@ def parse_into(con, agent, file, searchable=True, identities=None):
         data, warnings = Dataset(), [f'{agent}/{file.name}: {error}']
     con.execute('INSERT OR REPLACE INTO files VALUES(?,?,?,?)',
                 (str(file), agent, size, json.dumps(warnings, ensure_ascii=False)))
-    store_dataset(con, str(file), data, searchable, identities=identities)
+    return store_dataset(con, str(file), data, searchable, identities=identities, incremental=incremental)
 
 
 def refresh_usage(con):
@@ -359,12 +395,13 @@ def refresh_usage(con):
                 + DEDUPED_USAGE + ') GROUP BY agent,session')
 
 
-def write_meta(con, indexed_at):
+def write_meta(con, indexed_at, revised=False):
     warnings, sources = [], defaultdict(int)
     for row in con.execute('SELECT agent,warnings FROM files'):
         sources[row['agent']] += 1
         warnings.extend(json.loads(row['warnings']))
-    meta = dict(version=SCHEMA_VERSION, indexed_at=indexed_at,
+    revision = secrets.token_hex(8) if revised else meta_value(con, 'export_revision', '')
+    meta = dict(version=SCHEMA_VERSION, indexed_at=indexed_at, export_revision=revision,
                 updated=datetime.now().astimezone().isoformat(),
                 warnings=warnings, sources=dict(sources), agents=TOOLS)
     con.execute('DELETE FROM meta')
@@ -453,20 +490,22 @@ def update_index(path, home=None):
     started = int(datetime.now().timestamp() * 1000)
     con = sqlite3.connect(str(path), timeout=30)
     con.row_factory = sqlite3.Row
-    changed = 0
     try:
+        changed = changed_files(con, home)
+        if not changed:
+            return 0
+        con.executescript(EXTRA_INDEXES)
         with con:
-            con.executescript(EXTRA_INDEXES)
-        for raw, agent in changed_files(con, home):
-            with con:
-                delete_file_rows(con, raw)
+            revised = False
+            for raw, agent in changed:
                 if agent is not None:
-                    parse_into(con, agent, Path(raw))
-            changed += 1
-        refresh_usage(con)
-        write_meta(con, started)
-        con.commit()
-        return changed
+                    revised = parse_into(con, agent, Path(raw), incremental=True) or revised
+                else:
+                    revised = bool(con.execute('SELECT 1 FROM turns WHERE file=? LIMIT 1', (raw,)).fetchone()) or revised
+                    delete_file_rows(con, raw)
+            refresh_usage(con)
+            write_meta(con, started, revised=revised)
+        return len(changed)
     finally:
         con.close()
 
@@ -486,15 +525,22 @@ def watch_index(server, interval=AUTO_REFRESH_SECONDS, clock=time.time, sleep=ti
         if not server.refresh_lock.acquire(blocking=False):
             continue
         try:
-            with closing(connect(server.db)) as con:
-                pending = len(changed_files(con, server.home))
-            if pending:
-                count = update_index(server.db, server.home)
+            count = update_index(server.db, server.home)
+            if count:
                 print(f'自动刷新：{count} 个 session 文件有变化，索引已更新', flush=True)
         except Exception as error:
             print(f'自动刷新失败：{error}', flush=True)
         finally:
             server.refresh_lock.release()
+
+
+def remote_turn_signature(turn):
+    output = turn['output']
+    if isinstance(output, list):
+        output = json.dumps(output, ensure_ascii=False)
+    values = [turn[key] for key in ('agent', 'session', 'model', 'timestamp', 'input', 'source')]
+    material = json.dumps([*values, output], ensure_ascii=False)
+    return hashlib.sha256(material.encode()).digest()
 
 
 def sync_remote(remote, directory, fetch=fetch_remote):
@@ -538,10 +584,12 @@ def sync_remote(remote, directory, fetch=fetch_remote):
                 probe = fetch(remote, f'/api/export?section=turns&cursor={cursor - 1}&limit=1')
                 first = (probe.get('turns') or [None])[0]
                 stable = bool(first) and first.get('id') == cursor and first.get('fingerprint') == cursor_fp
+            remaining, old_terms = defaultdict(list), defaultdict(dict)
             if not stable:
-                con.execute("INSERT INTO search(search) VALUES('delete-all')")
-                con.execute('DELETE FROM turns')
-                con.execute('DELETE FROM terms')
+                for turn in con.execute('SELECT id,agent,session,model,timestamp,input,output,source,fingerprint FROM turns'):
+                    remaining[remote_turn_signature(turn)].append((turn['id'], turn['fingerprint']))
+                for term in con.execute('SELECT turn_id,term,count FROM terms'):
+                    old_terms[term['turn_id']][term['term']] = term['count']
                 cursor, cursor_fp = 0, None
             while True:
                 page = fetch(remote, f'/api/export?section=turns&limit=500&cursor={cursor}')
@@ -551,13 +599,24 @@ def sync_remote(remote, directory, fetch=fetch_remote):
                     sources = page['meta'].get('sources') or sources
                 for turn in turns:
                     terms = [(t['term'], t['count']) for t in turn.get('terms', [])]
-                    insert_turn(con, turn['agent'], turn['session'], turn['model'], turn['timestamp'],
-                                turn['input'], turn['output'],
-                                f"{remote['host']}:{remote['port']} · " + (turn.get('source') or ''),
-                                terms, True, None, None, turn.get('fingerprint'))
+                    source = f"{remote['host']}:{remote['port']} · " + (turn.get('source') or '')
+                    candidates = remaining.get(remote_turn_signature({**turn, 'source': source})) if not stable else None
+                    if candidates:
+                        rowid, fingerprint = candidates.pop()
+                        if fingerprint != turn.get('fingerprint'):
+                            con.execute('UPDATE turns SET fingerprint=? WHERE id=?', (turn.get('fingerprint'), rowid))
+                        if old_terms[rowid] != dict(terms):
+                            con.execute('DELETE FROM terms WHERE turn_id=?', (rowid,))
+                            con.executemany('INSERT INTO terms VALUES(?,?,?)', [(term, rowid, count) for term, count in terms])
+                    else:
+                        insert_turn(con, turn['agent'], turn['session'], turn['model'], turn['timestamp'],
+                                    turn['input'], turn['output'], source,
+                                    terms, True, None, None, turn.get('fingerprint'))
                     cursor, cursor_fp = turn['id'], turn.get('fingerprint')
                 if not page.get('cursor') or not turns:
                     break
+            if not stable:
+                delete_turn_rows(con, [rowid for candidates in remaining.values() for rowid, _ in candidates])
             synced_at = datetime.now().astimezone().isoformat()
             meta = dict(version=SCHEMA_VERSION, host=remote['host'], port=remote['port'],
                         updated=updated, sources=sources,
@@ -581,6 +640,13 @@ def sync_remote(remote, directory, fetch=fetch_remote):
     finally:
         con.close()
     return status
+
+
+def sync_remotes(remotes, directory):
+    if not remotes:
+        return []
+    with ThreadPoolExecutor(max_workers=min(4, len(remotes))) as pool:
+        return list(pool.map(lambda remote: sync_remote(remote, directory), remotes))
 
 
 def buckets_between(start, end, unit):
@@ -1418,7 +1484,7 @@ def query_session(sources, p):
 def query(con, endpoint, p, exclude=(), writable=True, sources=None):
     sources = sources or [Source('local', '本机', con)]
     if endpoint == '/api/meta':
-        result = {r['key']: json.loads(r['value']) for r in con.execute("SELECT * FROM meta WHERE key NOT IN ('version','indexed_at')")}
+        result = {r['key']: json.loads(r['value']) for r in con.execute("SELECT * FROM meta WHERE key NOT IN ('version','indexed_at','export_revision')")}
         turns = sessions = 0
         models = defaultdict(int)
         counts = defaultdict(int)
@@ -1460,6 +1526,7 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                 (cursor, limit + 1))]
             more = len(rows) > limit
             rows = rows[:limit]
+            revision = meta_value(con, 'export_revision')
             terms = defaultdict(list)
             if rows:
                 marks = ','.join('?' * len(rows))
@@ -1468,6 +1535,9 @@ def query(con, endpoint, p, exclude=(), writable=True, sources=None):
                         [row['id'] for row in rows]):
                     terms[row['turn_id']].append(dict(term=row['term'], count=row['count']))
             for row in rows:
+                # 既有轮次改变时让所有游标的探针失效；旧版同步方也能按原协议全量重拉。
+                if revision:
+                    row['fingerprint'] = hashlib.sha1(f"{revision}:{row['fingerprint']}".encode()).hexdigest()[:16]
                 row['output'] = json.loads(row['output'])
                 row['terms'] = terms[row['id']]
             result = dict(turns=rows, cursor=rows[-1]['id'] if more else None)
@@ -1661,7 +1731,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self.server.refresh_lock.acquire(blocking=False):
                 return self.respond(409, {'error': '正在同步或刷新，请稍候'})
             try:
-                statuses = [sync_remote(remote, self.server.directory) for remote in selected]
+                statuses = sync_remotes(selected, self.server.directory)
                 return self.respond(200, {'ok': True, 'remotes': statuses})
             finally:
                 self.server.refresh_lock.release()
@@ -1671,7 +1741,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(409, {'error': '正在刷新索引，请稍候'})
         try:
             update_index(self.server.db, self.server.home)
-            statuses = [sync_remote(remote, self.server.directory) for remote in load_remotes() if remote['enabled']]
+            statuses = sync_remotes([remote for remote in load_remotes() if remote['enabled']], self.server.directory)
             self.respond(200, {'ok': True, 'remotes': statuses})
         except Exception as error:
             self.respond(500, {'error': f'刷新失败，保留旧索引：{error}'})
