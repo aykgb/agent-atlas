@@ -15,6 +15,7 @@
   --grid-line: #edf0f4;
   --other-color: #c7cfd9;
   --comp-cr: #7c93a8;
+  --c-opencode: #727985;
   --c-gpt-1: #181c23;
   --c-gpt-2: #303744;
   --c-gpt-3: #475163;
@@ -48,6 +49,7 @@
     --grid-line: #232d3d;
     --other-color: #526075;
     --comp-cr: #556d82;
+    --c-opencode: #8b93a1;
     --c-gpt-1: #d4dce8;
     --c-gpt-2: #a6b4c8;
     --c-gpt-3: #7d8da4;
@@ -81,6 +83,7 @@
   --grid-line: #232d3d;
   --other-color: #526075;
   --comp-cr: #556d82;
+  --c-opencode: #8b93a1;
   --c-gpt-1: #d4dce8;
   --c-gpt-2: #a6b4c8;
   --c-gpt-3: #7d8da4;

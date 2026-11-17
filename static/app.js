@@ -12,13 +12,13 @@ const AGENT_COLORS = {
   codex: 'var(--c-gpt-1)',
   claude: '#d96b43',
   dsh: '#2b5aed',
-  opencode: '#c4841d',
+  opencode: 'var(--c-opencode)',
   pi: '#6c47d6',
+  omp: '#9370eb',
   agy: '#0d9488',
-  omp: '#298a53',
   grok: '#b3363e',
 };
-const AGENT_FALLBACK_PALETTE = ['#d96b43', '#2b5aed', '#6c47d6', '#0d9488', '#c4841d', '#298a53', '#b3363e', 'var(--c-gpt-2)'];
+const AGENT_FALLBACK_PALETTE = ['#d96b43', '#2b5aed', '#6c47d6', '#9370eb', '#0d9488', 'var(--c-opencode)', '#b3363e', 'var(--c-gpt-2)'];
 const MODEL_FAMILY_RULES = [
   ['claude', /(?:^|[/_-])(claude|anthropic|sonnet|opus|haiku)/i],
   ['deepseek', /(?:^|[/_-])(deepseek|dsv\d)/i],
