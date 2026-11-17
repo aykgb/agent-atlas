@@ -38,5 +38,6 @@
 | 32 | 会话搜索功能优化与增强 | P1 | ✅ | [search-enhancement.md](docs/tasks/search-enhancement.md)：拆分 COUNT 与 LIMIT 查询、短词预过滤、引号精确短语/排除词/scope/source/session/relevance/会话分组、多片段命中摘要与展开高亮导航；契约 58 项+node 检查+Chrome 桌面/移动实测通过 |
 | 33 | 会话展示与输入词频功能优化增强 | P1 | ✅ | [sessions-words-enhancement.md](docs/tasks/sessions-words-enhancement.md)：`/api/sessions` 补首句 topic/models/排序/合并筛选与总量摘要、`/api/session` 补用量拆解与批展开/倒序/首末跳/MD 导出；`/api/words` 补排序/词性过滤/最少轮次/子串过滤/平均占比与词云+4 KPI+撤销排除；契约 60 项+node 检查+Chrome 桌面/移动实测通过 |
 | 34 | 刷新数据耗时优化 | P1 | ✅ | [refresh-performance.md](docs/tasks/refresh-performance.md)：逐轮索引复用、无变化快路径、远端并行及重拉复用；契约 69 项+node 检查通过，服务重启与完整刷新实测通过；历史重拉仍受网络传输限制 |
+| 35 | 用量概览：固定 Agent 与模型颜色并区分三套色彩体系 | P2 | ✅ | [usage-color-systems.md](docs/tasks/usage-color-systems.md)：Token 构成/Agent/模型三套独立色系，各 Agent 与模型颜色恒定并同步到趋势、占比、排名与明细表；契约 69 项+node 检查+Chrome 实测通过 |
 
 状态：空 = 待办，🔄 = 进行中，✅ = 完成；详情列为任务文档或提交号。

@@ -14,6 +14,11 @@
   --track: #eff2f8;
   --grid-line: #edf0f4;
   --other-color: #c7cfd9;
+  --comp-cr: #7c93a8;
+  --c-gpt-1: #181c23;
+  --c-gpt-2: #303744;
+  --c-gpt-3: #475163;
+  --c-gpt-4: #606c80;
   --good: #3d7a5a;
   --bad: #b03a32;
   --warn-bg: #fff8e8;
@@ -42,6 +47,11 @@
     --track: #222c3d;
     --grid-line: #232d3d;
     --other-color: #526075;
+    --comp-cr: #556d82;
+    --c-gpt-1: #d4dce8;
+    --c-gpt-2: #a6b4c8;
+    --c-gpt-3: #7d8da4;
+    --c-gpt-4: #5d6c82;
     --good: #5bb98c;
     --bad: #f07b72;
     --warn-bg: #2a2415;
@@ -70,6 +80,11 @@
   --track: #222c3d;
   --grid-line: #232d3d;
   --other-color: #526075;
+  --comp-cr: #556d82;
+  --c-gpt-1: #d4dce8;
+  --c-gpt-2: #a6b4c8;
+  --c-gpt-3: #7d8da4;
+  --c-gpt-4: #5d6c82;
   --good: #5bb98c;
   --bad: #f07b72;
   --warn-bg: #2a2415;
@@ -617,6 +632,11 @@ svg text {
   color: var(--muted);
 }
 
+.other-detail .swatch {
+  margin-right: 5px;
+  vertical-align: -1px;
+}
+
 .other-detail strong {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
@@ -762,6 +782,11 @@ svg text {
   white-space: nowrap;
 }
 
+.rank-name .swatch {
+  margin-right: 7px;
+  vertical-align: -1px;
+}
+
 .rank-track {
   height: 7px;
   background: var(--track);
@@ -847,6 +872,18 @@ td:first-child b {
 
 td:first-child small {
   color: var(--muted);
+}
+
+td:first-child .swatch {
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+
+td:first-child small .swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  vertical-align: 0;
 }
 
 tbody tr.usage-row {

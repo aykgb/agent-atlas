@@ -1,14 +1,47 @@
 'use strict';
 
 const $ = id => document.getElementById(id);
-const SERIES_COLORS = ['#4f75e3', '#2fa98f', '#9b72cf', '#e59a4c', '#e06d85', '#4da6d9', '#8ab34e'];
 const OTHER_COLOR = 'var(--other-color)';
 const COMP_PARTS = [
-  ['new', '新增输入', '#4f75e3'],
-  ['cc', '缓存写入', '#e59a4c'],
-  ['cr', '缓存读取', '#2fa98f'],
-  ['out', '模型输出', '#9b72cf'],
+  ['new', '新增输入', '#3898bd'],
+  ['cc', '缓存写入', '#c99b49'],
+  ['cr', '缓存读取', 'var(--comp-cr)'],
+  ['out', '模型输出', '#9e5b8a'],
 ];
+const AGENT_COLORS = {
+  codex: 'var(--c-gpt-1)',
+  claude: '#d96b43',
+  dsh: '#2b5aed',
+  opencode: '#c4841d',
+  pi: '#6c47d6',
+  agy: '#0d9488',
+  omp: '#298a53',
+  grok: '#b3363e',
+};
+const AGENT_FALLBACK_PALETTE = ['#d96b43', '#2b5aed', '#6c47d6', '#0d9488', '#c4841d', '#298a53', '#b3363e', 'var(--c-gpt-2)'];
+const MODEL_FAMILY_RULES = [
+  ['claude', /(?:^|[/_-])(claude|anthropic|sonnet|opus|haiku)/i],
+  ['deepseek', /(?:^|[/_-])(deepseek|dsv\d)/i],
+  ['qwen', /(?:^|[/_-])(qwen|qwopus|tongyi)/i],
+  ['gemini', /(?:^|[/_-])(gemini|gemma)/i],
+  ['kimi', /(?:^|[/_-])(kimi|moonshot)/i],
+  ['glm', /(?:^|[/_-])(glm|chatglm)/i],
+  ['grok', /(?:^|[/_-])(grok|xai)/i],
+  ['nemotron', /(?:^|[/_-])(nemotron|nvidia)/i],
+  ['gpt', /(?:^|[/_-])(gpt|o[134](?:$|[/_-])|openai|codex)/i],
+];
+const MODEL_FAMILY_SCALES = {
+  gpt: ['var(--c-gpt-1)', 'var(--c-gpt-2)', 'var(--c-gpt-3)', 'var(--c-gpt-4)'],
+  claude: ['#d96b43', '#e6845a', '#bd522c', '#eea077'],
+  deepseek: ['#2b5aed', '#4e79f6', '#1e43bd', '#7598fa'],
+  qwen: ['#6c47d6', '#8764e6', '#5230b5', '#a183f0', '#3e2291'],
+  gemini: ['#0d9488', '#26b0a3', '#0b7369', '#4ec7bb'],
+  kimi: ['#c23b66', '#dc5a83', '#9e2b50'],
+  glm: ['#298a53', '#42a66d', '#1e6b3f'],
+  grok: ['#b3363e', '#cf5159', '#8f262d'],
+  nemotron: ['#65a30d', '#84cc16', '#4d7c0f'],
+  other: ['#b07d2b', '#3e7496', '#8c4a7e', '#5c873a', '#9e5a52', '#4f6680'],
+};
 const METRICS = {
   total: {label: '总用量', unit: 'tokens', value: r => r.total},
   active: {label: '非缓存', unit: 'tokens', value: r => r.new + r.out},
@@ -40,6 +73,10 @@ const state = {
   sessionPage: 1,
   session: null,
   modelNames: new Map(),
+  modelColors: new Map(),
+  modelFamilyCounts: new Map(),
+  pairColors: new Map(),
+  pairFamilyCounts: new Map(),
   metric: 'total',
   trendMode: 'stack',
   group: 'agent',
@@ -78,6 +115,79 @@ const empty = text => '<div class="empty">' + esc(text) + '</div>';
 const dateValue = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 const metricValue = row => METRICS[state.metric].value(row);
 const formatMetric = val => state.metric === 'msgs' ? number(val) : compact(val);
+
+function hashKey(raw) {
+  const str = String(raw || '').toLowerCase();
+  let h = 245;
+  for (let i = 0; i < str.length; i++) {
+    h = Math.imul(h ^ str.charCodeAt(i), 2654435761) >>> 0;
+  }
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+function agentColor(name) {
+  const key = String(name || '').toLowerCase();
+  if (!key || key === '其他') return OTHER_COLOR;
+  return AGENT_COLORS[key] || AGENT_FALLBACK_PALETTE[hashKey(key) % AGENT_FALLBACK_PALETTE.length];
+}
+
+function modelFamily(name) {
+  const str = String(name || '').toLowerCase();
+  for (const [family, rx] of MODEL_FAMILY_RULES) {
+    if (rx.test(str)) return family;
+  }
+  return 'other';
+}
+
+function nextFamilyShade(family, countsMap, fallbackKey) {
+  const scale = MODEL_FAMILY_SCALES[family] || MODEL_FAMILY_SCALES.other;
+  const used = countsMap.get(family) || 0;
+  countsMap.set(family, used + 1);
+  if (used < scale.length) return scale[used];
+  return scale[hashKey(fallbackKey) % scale.length];
+}
+
+function modelColor(name) {
+  const raw = String(name || '');
+  if (!raw || raw === '其他') return OTHER_COLOR;
+  const key = modelOf(raw).toLowerCase();
+  if (state.modelColors.has(key)) return state.modelColors.get(key);
+  if (key === 'unknown' || key === '<synthetic>') {
+    const muted = '#7c8ba1';
+    state.modelColors.set(key, muted);
+    return muted;
+  }
+  const family = modelFamily(key);
+  const color = nextFamilyShade(family, state.modelFamilyCounts, key);
+  state.modelColors.set(key, color);
+  return color;
+}
+
+function pairColor(pairKey) {
+  const raw = String(pairKey || '');
+  if (!raw || raw === '其他') return OTHER_COLOR;
+  const key = raw.toLowerCase();
+  if (state.pairColors.has(key)) return state.pairColors.get(key);
+  const [, ...rest] = raw.split(' / ');
+  const model = rest.join(' / ');
+  const mKey = modelOf(model).toLowerCase();
+  if (mKey === 'unknown' || mKey === '<synthetic>') {
+    const muted = '#7c8ba1';
+    state.pairColors.set(key, muted);
+    return muted;
+  }
+  const family = modelFamily(mKey);
+  const color = nextFamilyShade(family, state.pairFamilyCounts, key);
+  state.pairColors.set(key, color);
+  return color;
+}
+
+function seriesColorFor(key, grouping) {
+  if (!key || key === '其他') return OTHER_COLOR;
+  if (grouping === 'model') return modelColor(key);
+  if (grouping === 'pair') return pairColor(key);
+  return agentColor(key);
+}
 
 function notice(text = '', error = false) {
   $('notice').textContent = text;
@@ -683,13 +793,14 @@ function renderRanking(id, entries, total, filterField) {
   entries.forEach(([name, value], index) => {
     const share = total > 0 ? (value / total * 100).toFixed(1) : '0.0';
     const active = currentFilter && currentFilter.toLowerCase() === name.toLowerCase();
+    const color = filterField === 'agent' ? agentColor(name) : modelColor(name);
     const row = document.createElement('button');
     row.type = 'button';
     row.className = 'rank-row' + (active ? ' is-active' : '');
     row.title = name + ' · ' + number(value) + ' ' + unitLabel + ' · 占比 ' + share + '%（点击筛选）';
     row.innerHTML = '<span class="rank-index">' + (index + 1) + '</span>' +
-      '<span class="rank-name">' + esc(name) + '</span>' +
-      '<div class="rank-track"><div class="rank-fill" style="width:' + (value / maximum * 100).toFixed(1) + '%"></div></div>' +
+      '<span class="rank-name"><i class="swatch" style="background:' + color + '"></i>' + esc(name) + '</span>' +
+      '<div class="rank-track"><div class="rank-fill" style="width:' + (value / maximum * 100).toFixed(1) + '%;background:' + color + '"></div></div>' +
       '<span class="rank-value">' + esc(formatMetric(value)) + ' · ' + share + '%</span>';
     row.addEventListener('click', () => {
       $(filterField).value = active ? '' : name;
@@ -754,7 +865,7 @@ function renderUsageTable(rowsMap) {
     const active = curAgent === r.agent && curModel === r.model.toLowerCase();
     const share = totalRow.total > 0 ? (r.total / totalRow.total * 100).toFixed(1) + '%' : '0.0%';
     return '<tr class="usage-row' + (active ? ' is-active' : '') + '" data-agent="' + esc(r.agent) + '" data-model="' + esc(r.model) + '" title="点击筛选该 Agent 与模型">' +
-      '<td><b>' + esc(r.model) + '</b><small>' + esc(r.agent) + '</small></td>' +
+      '<td><b><i class="swatch" style="background:' + modelColor(r.model) + '"></i>' + esc(r.model) + '</b><small><i class="swatch" style="background:' + agentColor(r.agent) + '"></i>' + esc(r.agent) + '</small></td>' +
       ['msgs', 'new', 'cc', 'cr', 'out', 'total'].map(k => '<td title="' + number(r[k]) + '">' + fmt(r[k]) + '</td>').join('') +
       '<td>' + share + '</td></tr>';
   }).join('');
@@ -902,10 +1013,11 @@ function renderCharts() {
       if (val > 0) totals.set(k, (totals.get(k) || 0) + val);
     }
     const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    ranked.forEach(([k]) => seriesColorFor(k, grouping));
     const top = ranked.slice(0, 7).map(([k]) => k);
     otherEntries = ranked.slice(7);
     const keys = otherEntries.length ? [...top, '其他'] : top;
-    seriesColorMap = new Map(keys.map((k, i) => [k, k === '其他' ? OTHER_COLOR : SERIES_COLORS[i]]));
+    seriesColorMap = new Map(keys.map(k => [k, seriesColorFor(k, grouping)]));
     const mergedTotals = new Map();
     for (const k of top) mergedTotals.set(k, totals.get(k));
     if (otherEntries.length) mergedTotals.set('其他', otherEntries.reduce((s, [, v]) => s + v, 0));
@@ -1102,7 +1214,7 @@ function renderCharts() {
     const shown = otherEntries.slice(0, 24);
     $('otherDetail').hidden = false;
     $('otherDetail').innerHTML = shown.map(([name, val]) =>
-      '<span>' + esc(name) + ' <strong>' + esc(formatMetric(val)) + '</strong> (' + (val / allTotal * 100).toFixed(1) + '%)</span>'
+      '<span><i class="swatch" style="background:' + seriesColorFor(name, grouping) + '"></i>' + esc(name) + ' <strong>' + esc(formatMetric(val)) + '</strong> (' + (val / allTotal * 100).toFixed(1) + '%)</span>'
     ).join('') + (otherEntries.length > shown.length ? '<span>…共 ' + otherEntries.length + ' 项</span>' : '');
   } else {
     $('otherDetail').hidden = true;
