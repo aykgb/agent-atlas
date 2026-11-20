@@ -207,6 +207,69 @@ class Contracts(unittest.TestCase):
         self.assertEqual([(u['model'],u['new'],u['out']) for u in d.usage],[('unknown',3,2)])
         self.assertEqual([t['input'] for t in d.turns],['问'])
 
+    def test_agy_prefers_full_transcript_without_double_counting_and_falls_back(self):
+        # 会话 A 同时存在 compact 与 full：优先读完整版，且同一会话只计一次来源与用量。
+        self.write('.gemini/antigravity-cli/brain/both/.system_generated/logs/transcript.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:00:00Z',
+                 content='<USER_REQUEST>长文问题</USER_REQUEST>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:01Z',
+                 input_tokens=10,output_tokens=5,content='开头\n<truncated 9000 bytes>\n结尾',truncated_fields=['content']),
+        ])
+        self.write('.gemini/antigravity-cli/brain/both/.system_generated/logs/transcript_full.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:00:00Z',
+                 content='<USER_REQUEST>长文问题</USER_REQUEST>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:01Z',
+                 input_tokens=10,output_tokens=5,content='开头\n完整中间段\n结尾'),
+        ])
+        # 会话 B 只有 compact：正常回退。
+        self.write('.gemini/antigravity-cli/brain/compact-only/.system_generated/logs/transcript.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:01:00Z',
+                 content='<USER_REQUEST>仅精简版</USER_REQUEST>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:01:01Z',
+                 input_tokens=4,output_tokens=2,content='精简答复'),
+        ])
+        d=collect(self.home)
+        self.assertEqual(d.sources['agy'],2)
+        self.assertEqual(sum(u['new'] for u in d.usage),14)
+        by_session={t['session']:t for t in d.turns}
+        self.assertEqual(by_session['both']['output'][0]['text'],'开头\n完整中间段\n结尾')
+        self.assertTrue(by_session['both']['source'].endswith('transcript_full.jsonl'))
+        self.assertEqual(by_session['compact-only']['output'][0]['text'],'精简答复')
+        self.assertTrue(by_session['compact-only']['source'].endswith('transcript.jsonl'))
+
+    def test_agy_incremental_upgrade_from_compact_to_full_transcript_replaces_turns(self):
+        session='agy-upgrade'
+        self.write(f'.gemini/antigravity-cli/brain/{session}/.system_generated/logs/transcript.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:00:00Z',
+                 content='<USER_REQUEST>升级测试</USER_REQUEST>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:01Z',
+                 input_tokens=12,output_tokens=6,content='前文\n<truncated 100 bytes>\n后文',truncated_fields=['content']),
+        ])
+        db=self.home/'agy-upgrade.sqlite'
+        rebuild(db,self.home)
+        with closing(connect(db)) as con:
+            before_rev=meta_value(con,'export_revision')
+            before_turn=query(con,'/api/turn',{'id':'local:1'})
+            self.assertIn('<truncated 100 bytes>',before_turn['output'][0]['text'])
+        # 出现完整版 transcript_full.jsonl 后，增量刷新须先清理旧文件再入库，不能因 identity 冲突丢失轮次。
+        self.write(f'.gemini/antigravity-cli/brain/{session}/.system_generated/logs/transcript_full.jsonl',[
+            dict(step_index=0,source='USER_EXPLICIT',type='USER_INPUT',created_at='2026-09-18T12:00:00Z',
+                 content='<USER_REQUEST>升级测试</USER_REQUEST>'),
+            dict(step_index=1,source='MODEL',type='PLANNER_RESPONSE',created_at='2026-09-18T12:00:01Z',
+                 input_tokens=12,output_tokens=6,content='前文\n完整未截断正文\n后文'),
+        ])
+        self.assertGreaterEqual(update_index(db,self.home),2)
+        with closing(connect(db)) as con:
+            after_rev=meta_value(con,'export_revision')
+            self.assertNotEqual(after_rev,before_rev)
+            sess=query(con,'/api/session',{'agent':'agy','session':session})
+            self.assertEqual(len(sess['turns']),1)
+            turn=query(con,'/api/turn',{'id':sess['turns'][0]['id']})
+            self.assertEqual(turn['output'][0]['text'],'前文\n完整未截断正文\n后文')
+            self.assertTrue(turn['source'].endswith('transcript_full.jsonl'))
+            hits=query(con,'/api/search',{'q':'完整未截断正文'})
+            self.assertEqual(hits['total'],1)
+
     def test_opencode_reads_messages_and_parts_without_writing_source(self):
         db=self.home/'.local/share/opencode/opencode.db'
         db.parent.mkdir(parents=True)

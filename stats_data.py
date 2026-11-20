@@ -598,6 +598,14 @@ def discover(home=None):
                 match = DSH_VERSION_RE.search(path.name)
                 versions.setdefault(path.parent, []).append((int(match.group(1)) if match else 0, path))
             paths = {max(entries, key=lambda entry: (entry[0], entry[1].name))[1] for entries in versions.values()}
+        if agent == 'agy':
+            # transcript.jsonl 会截断长正文/思考/工具内容，同目录优先读完整版 transcript_full.jsonl。
+            paths.update(root.glob('.gemini/antigravity-cli/brain/*/.system_generated/logs/transcript_full.jsonl'))
+            by_dir = {}
+            for path in paths:
+                if path.name == 'transcript_full.jsonl' or path.parent not in by_dir:
+                    by_dir[path.parent] = path
+            paths = set(by_dir.values())
         found.extend((agent, path) for path in sorted(paths))
     db = root / '.local/share/opencode/opencode.db'
     if db.exists():

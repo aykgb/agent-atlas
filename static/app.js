@@ -1285,22 +1285,29 @@ function renderCharts() {
 
 /* ---------- Turn Detail, Copy, Sessions, Search ---------- */
 function copyText(text, button) {
-  const done = () => {
-    const prev = button.textContent;
-    button.textContent = '已复制';
-    setTimeout(() => { button.textContent = prev; }, 1200);
+  const flash = label => {
+    if (!button.dataset.origText) button.dataset.origText = button.textContent;
+    clearTimeout(button._copyTimer);
+    button.textContent = label;
+    button._copyTimer = setTimeout(() => { button.textContent = button.dataset.origText; }, 1200);
   };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(done).catch(() => {});
-  } else {
+  const fallback = () => {
     const ta = document.createElement('textarea');
     ta.value = text;
+    ta.setAttribute('readonly', '');
     ta.style.position = 'fixed';
     ta.style.opacity = '0';
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand('copy'); done(); } catch (_) {}
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
     ta.remove();
+    flash(ok ? '已复制' : '复制失败');
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(() => flash('已复制'), fallback);
+  } else {
+    fallback();
   }
 }
 
@@ -1345,6 +1352,7 @@ async function loadTurn(detail, id) {
     const highlightInput = isSearch && (scope === 'all' || scope === 'input');
     const inputHit = highlightInput && hasTermMatch(turn.input, terms);
     const inputOpen = !isSearch || !anyPartHit || inputHit || scope === 'all' || scope === 'input';
+    const textParts = turn.output.filter(part => part.kind === '正文' && part.text);
 
     body.innerHTML =
       '<details' + (inputOpen ? ' open' : '') + '><summary><span>用户输入</span>' +
@@ -1352,7 +1360,10 @@ async function loadTurn(detail, id) {
       '<button type="button" class="copy-btn" data-copy-input="1">复制</button></span></summary><pre>' +
       (highlightInput ? highlight(turn.input) : esc(turn.input)) + '</pre></details>' +
       (turn.output.length
-        ? '<details class="response"' + (anyPartHit ? ' open' : '') + '><summary><span>Agent 响应 · ' + turn.output.length + ' 段</span><button type="button" class="copy-btn" data-expand-parts="1">展开全部段</button></summary><div class="response-body">' + parts + '</div></details>'
+        ? '<details class="response"' + (anyPartHit ? ' open' : '') + '><summary><span>Agent 响应 · ' + turn.output.length + ' 段</span>' +
+          '<span class="turn-summary-actions">' +
+          (textParts.length ? '<button type="button" class="copy-btn" data-copy-response="1">复制正文</button>' : '') +
+          '<button type="button" class="copy-btn" data-expand-parts="1">展开全部段</button></span></summary><div class="response-body">' + parts + '</div></details>'
         : '<p>该轮尚无可见输出。</p>') +
       '<div class="source">会话 ' + esc(turn.session) + '<br>来源 ' + esc(turn.source) + '</div>';
 
@@ -1387,6 +1398,11 @@ async function loadTurn(detail, id) {
       event.preventDefault();
       event.stopPropagation();
       copyText(turn.input, event.currentTarget);
+    });
+    body.querySelector('[data-copy-response]')?.addEventListener('click', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      copyText(textParts.map(part => part.text).join('\n\n'), event.currentTarget);
     });
     body.querySelectorAll('[data-copy-part]').forEach(btn => {
       btn.addEventListener('click', event => {

@@ -497,12 +497,14 @@ def update_index(path, home=None):
         con.executescript(EXTRA_INDEXES)
         with con:
             revised = False
+            # 先清理已消失文件，避免同会话切换路径（如 transcript.jsonl → transcript_full.jsonl）时与旧 identity 冲突被跳过。
+            for raw, agent in changed:
+                if agent is None:
+                    revised = bool(con.execute('SELECT 1 FROM turns WHERE file=? LIMIT 1', (raw,)).fetchone()) or revised
+                    delete_file_rows(con, raw)
             for raw, agent in changed:
                 if agent is not None:
                     revised = parse_into(con, agent, Path(raw), incremental=True) or revised
-                else:
-                    revised = bool(con.execute('SELECT 1 FROM turns WHERE file=? LIMIT 1', (raw,)).fetchone()) or revised
-                    delete_file_rows(con, raw)
             refresh_usage(con)
             write_meta(con, started, revised=revised)
         return len(changed)
